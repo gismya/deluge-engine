@@ -1,0 +1,45 @@
+# Test-port lines for perform_engine --inject: from boot, pin the rolls, enter Perform on Acid techno and press PLAY.
+# The same presses as the firmware's perform_open.txt, perform_pick_acid.txt and perform_confirm.txt, without their
+# expects: the firmware's own waits space them instead. All go in at once (the queue holds 63).
+1.0 hold entropy
+1.0 button SHIFT down
+1.0 wait 100
+1.0 button SESSION_VIEW down
+1.0 wait 100
+1.0 button SESSION_VIEW up
+1.0 wait 100
+1.0 button SHIFT up
+1.0 wait 1500
+1.0 button SHIFT down
+1.0 wait 100
+1.0 button SESSION_VIEW down
+1.0 wait 100
+1.0 button SESSION_VIEW up
+1.0 wait 100
+1.0 button SHIFT up
+1.0 wait 500
+1.0 button 4 3 down
+1.0 wait 50
+1.0 button 4 3 up
+1.0 wait 500
+1.0 button 4 3 down
+1.0 wait 50
+1.0 button 4 3 up
+1.0 wait 300
+1.0 pick genre techno-acid
+1.0 button 4 3 down
+1.0 wait 50
+1.0 button 4 3 up
+1.0 wait 300
+1.0 pick genre techno-acid
+1.0 button 4 3 down
+1.0 wait 50
+1.0 button 4 3 up
+1.0 wait 500
+1.0 button 4 3 down
+1.0 wait 50
+1.0 button 4 3 up
+1.0 wait 5000
+1.0 button PLAY down
+1.0 wait 50
+1.0 button PLAY up

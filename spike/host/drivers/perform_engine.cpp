@@ -6,12 +6,17 @@
 // usage: DELUGE_SD_IMAGE=card.img perform_engine [--udp LISTEN:SEND] [--pace F] [--ticks-per-read N]
 //                                               [--seconds S] [--play-seconds S] [--out out.wav]
 //   --udp           the probe's ports (deluge_probe.py --udp LISTEN:SEND): the Engine binds SEND, sends to LISTEN
+//   --card-us C:S   model card reads: C us per read command plus S us per 512-byte sector (default instant)
+//   --inject FILE   test-port lines called in directly at fixed virtual times ("T line"; see readInjections())
+//   --free-after-play  stop pacing once playback starts
 //   --pace F        hold virtual time to F x the wall clock (1 = real time); 0, the default, runs free
 //   --seconds       stop after this much virtual time in all (default 600)
 //   --play-seconds  stop this long (virtual) after playback starts (default 60)
 #include "OSLikeStuff/scheduler_api.h"
 #include "OSLikeStuff/task_scheduler/task_scheduler.h"
 #include "definitions_cxx.hpp"
+#include "gui/ui/root_ui.h"
+#include "gui/ui/ui.h"
 #include "gui/ui_timer_manager.h"
 #include "hid/display/display.h"
 #include "hid/display/oled.h"
@@ -19,6 +24,8 @@
 #include "hid/encoders.h"
 #include "model/settings/runtime_feature_settings.h"
 #include "io/midi/midi_device_manager.h"
+#include "io/debug/print.h"
+#include "io/midi/test_port.h"
 #include "io/midi/midi_follow.h"
 #include "playback/mode/playback_mode.h"
 #include "playback/mode/session.h"
@@ -32,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -44,6 +52,8 @@ extern void (*host_audio_sink)(const int32_t* frame);
 extern uint64_t host_dma_frames;
 extern uint64_t host_dma_overruns;
 extern uint64_t host_midi_bytes_in, host_midi_bytes_out;
+extern bool host_midi_print_events;
+extern uint32_t host_card_ticks_per_command, host_card_ticks_per_sector;
 bool host_midi_udp_open(int probeListen, int probeSend);
 }
 void setupBlankSong();
@@ -63,12 +73,70 @@ public:
 };
 
 std::vector<int32_t> audio; // every frame the DMA played since boot, L R interleaved
+bool keepAudio = false;
 void sink(const int32_t* frame) {
-	audio.push_back(frame[0]);
-	audio.push_back(frame[1]);
+	// Only for --out, and at most 20 minutes: a long script run (thousands of virtual seconds) would not fit.
+	if (keepAudio && audio.size() < (size_t)kSampleRate * 2 * 1200) {
+		audio.push_back(frame[0]);
+		audio.push_back(frame[1]);
+	}
+}
+
+// --inject FILE: test-port lines handed straight to TestPort::injectReceived(), no MIDI, each at a fixed virtual
+// time ("T line", or a bare line for T = 0.5 s). The firmware's own "wait" lines space them, so a run repeats exactly.
+struct Injection {
+	double at;
+	std::string line;
+};
+std::vector<Injection> injections;
+size_t nextInjection = 0;
+
+void readInjections(const char* path) {
+	FILE* f = std::fopen(path, "r");
+	if (!f) {
+		std::perror(path);
+		std::exit(2);
+	}
+	char buf[256];
+	while (std::fgets(buf, sizeof(buf), f)) {
+		std::string line(buf);
+		while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+			line.pop_back();
+		}
+		if (line.empty() || line[0] == '#') {
+			continue;
+		}
+		double at = 0.5;
+		char* end;
+		double t = std::strtod(line.c_str(), &end);
+		if (end != line.c_str() && *end == ' ') {
+			at = t;
+			line = std::string(end + 1);
+		}
+		injections.push_back({at, line});
+	}
+	std::fclose(f);
+}
+
+void injectDue(double v) {
+#if ENABLE_SYSEX_TEST
+	static uint8_t seq = 0;
+	while (nextInjection < injections.size() && injections[nextInjection].at <= v) {
+		const std::string& line = injections[nextInjection++].line;
+		// The payload as HIDSysex::sysexReceived() hands it on: HID command, inject command, sequence, text, F7.
+		std::vector<uint8_t> data{0x02, TestPort::kInjectCommand, uint8_t(++seq & 0x7F)};
+		data.insert(data.end(), line.begin(), line.end());
+		data.push_back(0xF7);
+		TestPort::injectReceived(MIDIDeviceManager::dinMIDIPorts, data.data(), (int32_t)data.size());
+		std::fprintf(stderr, "  inject at %.3f s: %s\n", v, line.c_str());
+	}
+#else
+	(void)v;
+#endif
 }
 
 double maxSeconds = 600;
+bool freeAfterPlay = false; // --free-after-play: stop pacing once playback starts (the scripts are done by then)
 double playSeconds = 60;
 const char* outPath = nullptr;
 auto wallStart = std::chrono::steady_clock::now();
@@ -163,6 +231,7 @@ void finish(const char* why) {
 // A host task in the firmware's scheduler: notices playback starting, watches the OLED and ends the run.
 void hostTask() {
 	const double v = virtualNow();
+	injectDue(v);
 	const bool playing = playbackHandler.isEitherClockActive();
 	if (playing && !started) {
 		started = true;
@@ -171,6 +240,9 @@ void hostTask() {
 		playStartWall = wallNow();
 		lastOledChange = v;
 		std::fprintf(stderr, "playback started at %.3f s virtual (%.2f s wall)\n", v, playStartWall);
+		if (freeAfterPlay) {
+			host_pace = 0;
+		}
 	}
 	if (started && playing) {
 		uint32_t h = oledHash();
@@ -183,8 +255,12 @@ void hostTask() {
 	}
 	if (v >= nextReport) {
 		nextReport += 5;
-		std::fprintf(stderr, "  t=%.1f s virtual, %.1f s wall, playing=%d voices=%d direness=%d overruns=%llu\n", v,
-		             wallNow(), playing, (int)AudioEngine::getNumVoices(), (int)AudioEngine::cpuDireness,
+		UI* ui = getCurrentUI();
+		RootUI* root = getRootUI();
+		std::fprintf(stderr,
+		             "  t=%.1f s virtual, %.1f s wall, ui=%s root=%s playing=%d voices=%d direness=%d overruns=%llu\n",
+		             v, wallNow(), ui ? ui->getUIName() : "none", root ? root->getUIName() : "none", playing,
+		             (int)AudioEngine::getNumVoices(), (int)AudioEngine::cpuDireness,
 		             (unsigned long long)host_dma_overruns);
 	}
 	if (started && v - playStartVirtual >= playSeconds) {
@@ -216,6 +292,19 @@ int main(int argc, char** argv) {
 		else if (arg("--play-seconds")) {
 			playSeconds = std::atof(argv[++i]);
 		}
+		else if (std::strcmp(argv[i], "--free-after-play") == 0) {
+			freeAfterPlay = true;
+		}
+		else if (arg("--card-us")) {
+			// "COMMAND:SECTOR" microseconds of modelled card transfer time, e.g. 300:20
+			double command = 0, sector = 0;
+			std::sscanf(argv[++i], "%lf:%lf", &command, &sector);
+			host_card_ticks_per_command = (uint32_t)(command * DELUGE_CLOCKS_PERf / 1e6);
+			host_card_ticks_per_sector = (uint32_t)(sector * DELUGE_CLOCKS_PERf / 1e6);
+		}
+		else if (arg("--inject")) {
+			readInjections(argv[++i]);
+		}
 		else if (arg("--out")) {
 			outPath = argv[++i];
 		}
@@ -228,6 +317,7 @@ int main(int argc, char** argv) {
 	host_virtual_clock = true;
 	host_dma_follows_clock = true;
 	host_audio_sink = sink;
+	keepAudio = outPath != nullptr;
 	audio.reserve((size_t)kSampleRate * 2 * 200);
 	if (udpSend && !host_midi_udp_open(udpListen, udpSend)) {
 		return 1;
@@ -251,6 +341,11 @@ int main(int argc, char** argv) {
 	uiTimerManager.setTimer(TimerName::GRAPHICS_ROUTINE, 50);
 	sdRoutineLock = false;
 	deluge::hid::display::Screensaver::settingsChanged();
+	if (!udpSend && !injections.empty()) {
+		// Inject mode: test events go to stderr (as the probe's "03 00 01" subscribe would send them over MIDI).
+		Debug::midiDebugCable = &MIDIDeviceManager::dinMIDIPorts;
+		host_midi_print_events = true;
+	}
 	std::fprintf(stderr, "booted at %.3f s virtual, %.2f s wall\n", virtualNow(), wallNow());
 
 	registerTasks();

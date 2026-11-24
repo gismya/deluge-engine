@@ -179,6 +179,7 @@ static uint8_t midiRx[65536];
 static uint32_t midiRxHead = 0, midiRxTail = 0;
 static uint32_t midiRxTime;
 uint64_t host_midi_bytes_in = 0, host_midi_bytes_out = 0;
+bool host_midi_print_events = false; // with no UDP link: print test-port event lines to stderr
 
 // The probe's spec: it binds LISTEN and sends to SEND, so the Engine binds SEND and sends to LISTEN.
 bool host_midi_udp_open(int probeListen, int probeSend) {
@@ -224,6 +225,24 @@ static uint32_t txFullness(int32_t item) {
 	return (uint32_t)(uartItems[item].txBufferWritePos - uartItems[item].txBufferReadPos) & (PIC_TX_BUFFER_SIZE - 1);
 }
 void uartFlushIfNotSending(int32_t item) {
+	if (item == UART_ITEM_MIDI && midiSock < 0 && host_midi_print_events) {
+		// No link: print the test port's event frames (F0 00 21 7B 01 03 40 01 <ascii> F7) to stderr.
+		static uint8_t frame[512];
+		static uint32_t len = 0;
+		uint32_t n = txFullness(item);
+		for (uint32_t i = 0; i < n; i++) {
+			uint8_t b = (uint8_t)midiTxBuffer[(uartItems[item].txBufferReadPos + i) & (PIC_TX_BUFFER_SIZE - 1)];
+			if (b == 0xF0) {
+				len = 0;
+			}
+			if (len < sizeof(frame)) {
+				frame[len++] = b;
+			}
+			if (b == 0xF7 && len > 9 && frame[5] == 0x03 && frame[6] == 0x40) {
+				std::fprintf(stderr, "event %.*s\n", (int)(len - 9), (const char*)frame + 8);
+			}
+		}
+	}
 	if (item == UART_ITEM_MIDI && midiSock >= 0) {
 		uint8_t out[PIC_TX_BUFFER_SIZE];
 		uint32_t n = txFullness(item);

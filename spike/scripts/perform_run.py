@@ -40,8 +40,12 @@ def main():
     ap.add_argument("--script", action="append", default=[])
     ap.add_argument("--engine", default=ENGINE)
     ap.add_argument("--card", default=os.path.expanduser("~/source/delugemu-sd/deluge_sd.img"))
+    ap.add_argument("--line", action="append", default=[],
+                    help="a script line run after the scripts (e.g. --line 'button PLAY down'); repeatable")
     ap.add_argument("--pace", type=float, default=1.0, help="virtual seconds per wall second while scripts run")
     ap.add_argument("--ticks-per-read", type=int, default=None)
+    ap.add_argument("--card-us", default=None, help="the Engine's modelled card time, COMMAND:SECTOR microseconds")
+    ap.add_argument("--free-after-play", action="store_true", help="the Engine runs free once playback starts")
     ap.add_argument("--play-seconds", type=float, default=60)
     ap.add_argument("--seconds", type=float, default=600)
     ap.add_argument("--out", default=None)
@@ -57,6 +61,10 @@ def main():
         cmd += ["--ticks-per-read", str(a.ticks_per_read)]
     if a.out:
         cmd += ["--out", a.out]
+    if a.card_us:
+        cmd += ["--card-us", a.card_us]
+    if a.free_after_play:
+        cmd += ["--free-after-play"]
     log = open(a.log, "w") if a.log else None
     t0 = time.monotonic()
     proc = subprocess.Popen(cmd, env=dict(os.environ, DELUGE_SD_IMAGE=a.card), stderr=log or None,
@@ -78,13 +86,23 @@ def main():
             line = deluge_probe.result_line(os.path.basename(path), failed, total, error)
             results.append(line)
             print(f"[perform-run] {line} ({time.monotonic() - start:.1f} s wall)", flush=True)
+        if a.line:
+            start = time.monotonic()
+            failed, total = deluge_probe.run_script(port, [(f"--line {i + 1}", t) for i, t in enumerate(a.line)])
+            line = deluge_probe.result_line("--line", failed, total)
+            results.append(line)
+            print(f"[perform-run] {line} ({time.monotonic() - start:.1f} s wall)", flush=True)
         # Ask for a final state, so the log shows where the scripts left the firmware.
         try:
             print("[perform-run] state:", port.state(), flush=True)
         except Exception as exc:  # noqa: BLE001 - the Engine may have ended already
             print("[perform-run] no state:", exc, flush=True)
         port.subscribe(False)
-        rc = proc.wait(timeout=max(1, a.timeout - (time.monotonic() - t0)))
+        if a.out:  # the Engine plays on to --play-seconds and writes the WAV
+            rc = proc.wait(timeout=max(1, a.timeout - (time.monotonic() - t0)))
+        else:
+            proc.terminate()
+            rc = 0 if proc.wait(timeout=10) in (0, -15) else proc.returncode
     except subprocess.TimeoutExpired:
         print("[perform-run] TIMEOUT: killing the Engine", flush=True)
         proc.kill()
