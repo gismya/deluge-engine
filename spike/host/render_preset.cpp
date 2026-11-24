@@ -8,7 +8,9 @@
 #include "hid/display/oled.h"
 #include "memory/general_memory_allocator.h"
 #include "model/clip/instrument_clip.h"
+#include "model/instrument/kit.h"
 #include "model/instrument/melodic_instrument.h"
+#include "model/note/note_row.h"
 #include "model/model_stack.h"
 #include "model/settings/runtime_feature_settings.h"
 #include "model/song/song.h"
@@ -50,6 +52,9 @@ static InstrumentClip* linkIntoSong(Song* song, Instrument* instrument) {
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStackWithTimelineCounter* modelStack =
 	    setupModelStackWithSong(modelStackMemory, song)->addTimelineCounter(clip);
+	if (instrument->type == OutputType::KIT) {
+		clip->setupAsNewKitClipIfNecessary(modelStack); // one NoteRow per drum
+	}
 	song->sessionClips.insertClipAtIndex(clip, song->sessionClips.getNumElements());
 	song->addOutput(instrument, false);
 	instrument->setActiveClip(modelStack);
@@ -121,13 +126,16 @@ int main(int argc, char** argv) {
 	name.set(slash ? slash + 1 : presetPath);
 	dir.set(presetPath, slash ? (int)(slash - presetPath) : 0);
 	Instrument* instrument = nullptr;
-	Error error = StorageManager::loadInstrumentFromFile(currentSong, nullptr, OutputType::SYNTH, true, &instrument,
+	const bool isKit = std::strncmp(presetPath, "KITS/", 5) == 0;
+	const OutputType type = isKit ? OutputType::KIT : OutputType::SYNTH;
+	Error error = StorageManager::loadInstrumentFromFile(currentSong, nullptr, type, true, &instrument,
 	                                                     &fp, &name, &dir);
 	if (error != Error::NONE || instrument == nullptr) {
 		std::fprintf(stderr, "loadInstrumentFromFile failed: error %d\n", (int)error);
 		return 1;
 	}
-	if (!linkIntoSong(currentSong, instrument)) {
+	InstrumentClip* clip = linkIntoSong(currentSong, instrument);
+	if (!clip) {
 		std::fprintf(stderr, "linking failed\n");
 		return 1;
 	}
@@ -136,6 +144,27 @@ int main(int argc, char** argv) {
 	char modelStackMemory[MODEL_STACK_MAX_SIZE];
 	ModelStack* modelStack = setupModelStackWithSong(modelStackMemory, currentSong);
 	auto* melodic = static_cast<MelodicInstrument*>(instrument);
+	// For a kit, `note` is the drum (NoteRow) index.
+	auto noteOn = [&](bool on) {
+		if (!isKit) {
+			if (on) {
+				melodic->beginAuditioningForNote(modelStack, note, 100, zeroMPEValues);
+			}
+			else {
+				melodic->endAuditioningForNote(modelStack, note);
+			}
+			return;
+		}
+		auto* kit = static_cast<Kit*>(instrument);
+		NoteRow* row = clip->noteRows.getElement(note);
+		ModelStackWithNoteRow* ms = modelStack->addTimelineCounter(clip)->addNoteRow(note, row);
+		if (on) {
+			kit->beginAuditioningforDrum(ms, row->drum, 100, zeroMPEValues);
+		}
+		else {
+			kit->endAuditioningForDrum(ms, row->drum);
+		}
+	};
 
 	std::vector<int32_t> out;
 	const uint32_t step = 32; // frames the "DMA" consumes between engine calls
@@ -145,11 +174,11 @@ int main(int argc, char** argv) {
 	bool released = false;
 	for (uint64_t frame = 0; frame < totalFrames; frame += step) {
 		if (!on && frame >= 4096) { // let the engine settle first
-			melodic->beginAuditioningForNote(modelStack, note, 100, zeroMPEValues);
+			noteOn(true);
 			on = true;
 		}
 		if (on && !released && frame >= 4096 + heldFrames) {
-			melodic->endAuditioningForNote(modelStack, note);
+			noteOn(false);
 			released = true;
 		}
 		// The DMA plays `step` frames, then the engine refills them for the next lap of the ring.
