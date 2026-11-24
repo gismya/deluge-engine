@@ -63,6 +63,26 @@ String synth(String name) => 'SYNTHS/$name.XML';
 String kit(String name) => 'KITS/$name.XML';
 String shortName(String path) => path.split('/').last.replaceAll(RegExp(r'\.(XML|wav)$'), '');
 
+/// A preset's number and title: 'SYNTHS/165 Acid Arp.XML' gives ('165', 'Acid Arp'). Samples have no number.
+(String?, String) splitName(String path) {
+  final n = shortName(path);
+  final preset = (path.startsWith('SYNTHS/') || path.startsWith('KITS/')) && RegExp(r'^\d{3} ').hasMatch(n);
+  return preset ? (n.substring(0, 3), n.substring(4)) : (null, n);
+}
+
+/// Keyword filters for the synth list.
+const synthTags = ['Bass', 'Lead', 'Pad', 'Arp', 'FM', 'Strings', 'Organ', 'Bell'];
+
+/// The Role each Part plays (deluge-generative GLOSSARY).
+const roles = {
+  'DRUMS': 'Drums', 'FX': 'FX', 'ACID': 'Bass', 'BASS': 'Bass', 'SUB': 'Bass', 'DRONE': 'Pad', 'PAD': 'Pad',
+  'STRINGS': 'Pad', 'STAB': 'Chords', 'ARP': 'Lead', 'MOTIF': 'Lead',
+};
+
+/// The Sections a 32-bar render passes through, with their bar counts and loudness.
+const sections = [('Intro', 4, 0.35), ('Groove', 8, 0.7), ('Build', 4, 0.8), ('Drop', 8, 1.0), ('Break', 4, 0.3), ('Outro', 4, 0.5)];
+const totalBars = 32;
+
 /// One palette entry: a sound and its weight.
 class Entry {
   const Entry(this.sound, this.weight);
@@ -77,6 +97,9 @@ class Slot {
   final String? lane;
   final List<Entry> palette;
   String get key => lane == null ? part : '$part · $lane';
+  String get name => lane ?? part;
+  int get total => palette.fold(0, (a, e) => a + e.weight);
+  Entry? entry(String? sound) => palette.where((e) => e.sound == sound).firstOrNull;
   bool get isSynth => palette.first.sound.startsWith('SYNTHS/');
 }
 
@@ -133,7 +156,10 @@ class Render {
   final Map<String, String> picks;
   final int seconds;
   String get label => '#$id $genre · seed $seed';
+  int get waveSeed => seed * 31 + picks.values.join().length * 7 + id;
 }
+
+enum Mode { piece, setup }
 
 enum EngineState { running, restarting }
 
@@ -144,6 +170,7 @@ class Model extends ChangeNotifier {
     channels[1].sound = synth('148 Warm 5th Pad');
     channels[9].sound = kit('003 TR-909');
     _rerollAll();
+    _seedRenders();
     _ticker = Timer.periodic(const Duration(milliseconds: 400), (_) => _tick());
   }
 
@@ -169,8 +196,117 @@ class Model extends ChangeNotifier {
   Render? playing;
   String? auditioning;
 
+  Mode mode = Mode.piece;
+  String? selectedSlot; // the key of the Part or lane the browser fills
+  String ab = 'A'; // which render the transport plays
+  double position = 0.31; // playhead, 0..1
+  bool live = false; // the Generator playing live, not a render
+  bool pickerOpen = false; // variant E's command palette
+  bool autoRender = true; // variant D: render the candidate after each change
+  String midiIn = 'KeyStep 37';
+
+  int get tempo => 126 + seed % 12;
+  String get keyName => const ['A min', 'C min', 'D min', 'F min', 'G min', 'E min'][seed % 6];
+
   List<Slot> get slots => genres[genre]!;
-  int get totalVoices => channels.fold(0, (a, c) => a + c.voices) + (playing != null ? 9 : 0);
+  Slot? get selected => slots.where((s) => s.key == selectedSlot).firstOrNull;
+  ChannelSlot get channel => channels[selectedChannel - 1];
+  Render? get active => ab == 'A' ? slotA : slotB;
+  int get channelsUsed => channels.where((c) => c.sound != null).length;
+
+  /// Whether the working picks differ from the newest render, so a render is due.
+  bool get dirty {
+    final r = renders.firstOrNull;
+    if (r == null) return true;
+    if (r.genre != genre || r.seed != seed) return true;
+    return picks.entries.any((e) => r.picks[e.key] != e.value);
+  }
+
+  /// The slots whose pick differs between two sets of picks.
+  List<Slot> diff(Map<String, String>? a, Map<String, String>? b) =>
+      a == null || b == null ? const [] : [for (final s in slots) if (a[s.key] != b[s.key]) s];
+
+  void setMode(Mode m) {
+    mode = m;
+    notifyListeners();
+  }
+
+  void selectSlot(String? key) {
+    selectedSlot = key;
+    notifyListeners();
+  }
+
+  void setPicker(bool open) {
+    pickerOpen = open;
+    notifyListeners();
+  }
+
+  void setAutoRender(bool v) {
+    autoRender = v;
+    notifyListeners();
+  }
+
+  void setAB(String v) {
+    ab = v;
+    if (playing != null && active != null) playing = active;
+    notifyListeners();
+  }
+
+  void toggleAB() => setAB(ab == 'A' ? 'B' : 'A');
+
+  void togglePlay() {
+    live = false;
+    play(playing == null ? active : null);
+  }
+
+  void toggleLive() {
+    live = !live;
+    playing = null;
+    status = live ? 'Playing $genre live, seed $seed' : 'Stopped';
+    notifyListeners();
+  }
+
+  void seek(double p) {
+    position = p.clamp(0.0, 1.0);
+    notifyListeners();
+  }
+
+  void promote() {
+    if (slotB == null) return;
+    slotA = slotB;
+    status = 'A is now ${slotA!.label}';
+    notifyListeners();
+  }
+
+  void swapAB() {
+    final a = slotA;
+    slotA = slotB;
+    slotB = a;
+    notifyListeners();
+  }
+
+  /// Puts the working picks back to what render A used.
+  void revertToA() {
+    if (slotA == null) return;
+    picks
+      ..clear()
+      ..addAll(slotA!.picks);
+    status = 'Sound picks back to A';
+    notifyListeners();
+  }
+
+  /// Two renders one Sound pick apart, so A/B has something to show at launch.
+  void _seedRenders() {
+    final acid = slots.firstWhere((s) => s.lane == null);
+    selectedSlot = acid.key;
+    picks[acid.key] = acid.palette.first.sound;
+    slotA = Render(1, genre, seed, Map.of(picks), lengthSeconds);
+    picks[acid.key] = acid.palette.last.sound;
+    slotB = Render(2, genre, seed, Map.of(picks), lengthSeconds);
+    renders.addAll([slotB!, slotA!]);
+    ab = 'B';
+  }
+  int get totalVoices => channels.fold(0, (a, c) => a + c.voices) + (playing != null || live ? 9 : 0);
 
   void _tick() {
     var changed = false;
@@ -179,6 +315,10 @@ class Model extends ChangeNotifier {
         c.voices = max(0, c.voices - 1);
         changed = true;
       }
+    }
+    if (playing != null || live) {
+      position = (position + 0.4 / lengthSeconds) % 1.0;
+      changed = true;
     }
     if (changed) notifyListeners();
   }
@@ -216,6 +356,7 @@ class Model extends ChangeNotifier {
   void setGenre(String g) {
     genre = g;
     _rerollAll();
+    selectedSlot = slots.firstWhere((s) => s.lane == null).key;
     status = 'Genre: $g. Sound picks rolled from its palette';
     notifyListeners();
   }
@@ -266,9 +407,12 @@ class Model extends ChangeNotifier {
     renders.insert(0, r);
     if (slotA == null) {
       slotA = r;
+      ab = 'A';
     } else {
       slotB = r;
+      ab = 'B';
     }
+    if (playing != null) playing = r;
     rendering = false;
     status = 'Rendered ${r.label} in 0.4 s (fake)';
     notifyListeners();
@@ -276,6 +420,9 @@ class Model extends ChangeNotifier {
 
   void play(Render? r) {
     playing = r;
+    if (r != null) live = false;
+    if (r != null && r == slotA) ab = 'A';
+    if (r != null && r == slotB) ab = 'B';
     status = r == null ? 'Stopped' : 'Playing ${r.label}';
     notifyListeners();
   }
@@ -308,7 +455,13 @@ class Model extends ChangeNotifier {
         'engine': engine.name,
         'lastError': lastError,
         'totalVoices': totalVoices,
+        'mode': mode.name,
         'selectedChannel': selectedChannel,
+        'selectedSlot': selectedSlot,
+        'ab': ab,
+        'position': position,
+        'live': live,
+        'dirty': dirty,
         'setup': {for (final c in channels) if (c.sound != null) 'ch${c.channel}': shortName(c.sound!)},
         'piece': {'genre': genre, 'seed': seed, 'lengthSeconds': lengthSeconds, 'picks': {for (final e in picks.entries) e.key: shortName(e.value)}},
         'renders': [for (final r in renders) r.label],
