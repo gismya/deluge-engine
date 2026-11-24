@@ -3,11 +3,18 @@
 // SPI-flash settings store (reads 0xFF like an erased chip, so FlashStorage falls back to defaults).
 #include "RZA1/system/r_typedefs.h"
 #include "definitions.h"
+#include "OSLikeStuff/timers_interrupts/clock_type.h"
 #include "fatfs/diskio.h"
 #include "fatfs/ff.h"
+#include <arpa/inet.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <mach/mach_time.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 extern "C" {
 #include "RZA1/ostm/ostm.h"
@@ -25,7 +32,30 @@ uint32_t host_audio_rx_write_frame = 0;
 
 void ssiInit(uint8_t, uint8_t) {
 }
+// With host_dma_follows_clock, the "DMA" read position is a pure function of the virtual clock (44.1 kHz of
+// DELUGE_CLOCKS_PER ticks), and every frame it passes is handed to host_audio_sink as played. Otherwise the driver
+// moves host_audio_tx_read_frame itself (render_preset).
+bool host_dma_follows_clock = false;
+void (*host_audio_sink)(const int32_t* frame) = nullptr;
+uint64_t host_dma_frames = 0;   // frames the DMA has read since boot
+uint64_t host_dma_overruns = 0; // times the DMA lapped the ring between two reads of its position (lost audio)
+extern uint64_t host_virtual_ticks;
+static void advanceDma() {
+	const uint64_t now = host_virtual_ticks * 44100 / DELUGE_CLOCKS_PER;
+	if (now - host_dma_frames > SSI_TX_BUFFER_NUM_SAMPLES) {
+		host_dma_overruns++;
+	}
+	for (; host_dma_frames < now; host_dma_frames++) {
+		if (host_audio_sink) {
+			host_audio_sink(&ssiTxBuffer[(host_dma_frames % SSI_TX_BUFFER_NUM_SAMPLES) * NUM_MONO_OUTPUT_CHANNELS]);
+		}
+	}
+	host_audio_tx_read_frame = host_dma_frames % SSI_TX_BUFFER_NUM_SAMPLES;
+}
 void* getTxBufferCurrentPlace() {
+	if (host_dma_follows_clock) {
+		advanceDma();
+	}
 	return &ssiTxBuffer[host_audio_tx_read_frame * NUM_MONO_OUTPUT_CHANNELS];
 }
 void* getRxBufferCurrentPlace() {
@@ -60,13 +90,47 @@ static uint64_t hostTicks33MHz() {
 	uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
 	return ns * 3333 / 100000; // 33.33 ticks per microsecond
 }
+// Virtual clock (host_virtual_clock): every read moves it on by host_ticks_per_read, so time passes only as the
+// firmware polls it, the same way on every run whatever the host's speed. With host_pace > 0 it is held back to
+// host_pace virtual seconds per wall-clock second (1 = real time), for a client that times itself by the wall clock.
+bool host_virtual_clock = false;
+uint32_t host_ticks_per_read = 33; // about 1 us of virtual time per read
+double host_pace = 0;
+uint64_t host_virtual_ticks = 0;
+static uint64_t paceWallStart = 0;
+static void pace() {
+	static mach_timebase_info_data_t tb;
+	if (tb.denom == 0) {
+		mach_timebase_info(&tb);
+	}
+	uint64_t wallNs = mach_absolute_time() * tb.numer / tb.denom;
+	if (paceWallStart == 0) {
+		paceWallStart = wallNs - (uint64_t)(host_virtual_ticks / (DELUGE_CLOCKS_PERf * host_pace) * 1e9);
+	}
+	double virtualS = host_virtual_ticks / DELUGE_CLOCKS_PERf;
+	double wallS = (wallNs - paceWallStart) * 1e-9 * host_pace;
+	if (virtualS > wallS + 0.001) {
+		usleep((useconds_t)((virtualS - wallS) / host_pace * 1e6));
+	}
+}
+static uint64_t hostTicks() {
+	if (!host_virtual_clock) {
+		return hostTicks33MHz();
+	}
+	host_virtual_ticks += host_ticks_per_read;
+	static uint32_t reads = 0;
+	if (host_pace > 0 && (++reads & 255) == 0) {
+		pace();
+	}
+	return host_virtual_ticks;
+}
 uint32_t getTimerValue(int timerNo) {
-	return (uint32_t)(hostTicks33MHz() - timerBase[timerNo & 7]);
+	return (uint32_t)(hostTicks() - timerBase[timerNo & 7]);
 }
 void setTimerValue(int, uint32_t) {
 }
 void enableTimer(int timerNo) {
-	timerBase[timerNo & 7] = hostTicks33MHz();
+	timerBase[timerNo & 7] = host_virtual_clock ? host_virtual_ticks : hostTicks33MHz();
 }
 void disableTimer(int) {
 }
@@ -104,26 +168,80 @@ uint16_t readInput(uint8_t, uint8_t) {
 void enableInputBuffer(uint8_t, uint8_t) {
 }
 
-// ---- UART (PIC and DIN MIDI): nothing ever arrives.
+// ---- UART. PIC: nothing arrives. DIN MIDI: with host_midi_udp_open(), raw MIDI bytes in UDP datagrams both ways,
+// as delugemu's MIDI bridge carries them, so deluge_probe.py --udp LISTEN:SEND talks to the Engine unchanged.
 struct UartItem uartItems[NUM_UART_ITEMS];
 uint8_t picTxBuffer[PIC_TX_BUFFER_SIZE];
 char midiTxBuffer[MIDI_TX_BUFFER_SIZE];
+static int midiSock = -1;
+static sockaddr_in midiPeer;
+static uint8_t midiRx[65536];
+static uint32_t midiRxHead = 0, midiRxTail = 0;
+static uint32_t midiRxTime;
+uint64_t host_midi_bytes_in = 0, host_midi_bytes_out = 0;
+
+// The probe's spec: it binds LISTEN and sends to SEND, so the Engine binds SEND and sends to LISTEN.
+bool host_midi_udp_open(int probeListen, int probeSend) {
+	midiSock = socket(AF_INET, SOCK_DGRAM, 0);
+	sockaddr_in me{};
+	me.sin_family = AF_INET;
+	me.sin_port = htons(probeSend);
+	me.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (midiSock < 0 || bind(midiSock, (sockaddr*)&me, sizeof(me)) != 0) {
+		std::perror("host_midi_udp_open");
+		return false;
+	}
+	fcntl(midiSock, F_SETFL, O_NONBLOCK);
+	midiPeer = me;
+	midiPeer.sin_port = htons(probeListen);
+	return true;
+}
+
 uint8_t uartGetChar(int32_t, char*) {
 	return 0;
 }
-uint32_t* uartGetCharWithTiming(int32_t, char*) {
-	return nullptr;
+uint32_t* uartGetCharWithTiming(int32_t item, char* out) {
+	if (item != TIMING_CAPTURE_ITEM_MIDI || midiSock < 0) {
+		return nullptr;
+	}
+	if (midiRxHead == midiRxTail) {
+		ssize_t n = recv(midiSock, midiRx, sizeof(midiRx), 0);
+		if (n <= 0) {
+			return nullptr;
+		}
+		midiRxHead = 0;
+		midiRxTail = (uint32_t)n;
+		host_midi_bytes_in += n;
+	}
+	*out = (char)midiRx[midiRxHead++];
+	midiRxTime = getTimerValue(0);
+	return &midiRxTime;
 }
 void uartPutCharBack(int32_t) {
 }
+// bufferMIDIUart() wraps the write position with PIC_TX_BUFFER_SIZE (sio_char.h), so the stand-in does too.
+static uint32_t txFullness(int32_t item) {
+	return (uint32_t)(uartItems[item].txBufferWritePos - uartItems[item].txBufferReadPos) & (PIC_TX_BUFFER_SIZE - 1);
+}
 void uartFlushIfNotSending(int32_t item) {
+	if (item == UART_ITEM_MIDI && midiSock >= 0) {
+		uint8_t out[PIC_TX_BUFFER_SIZE];
+		uint32_t n = txFullness(item);
+		for (uint32_t i = 0; i < n; i++) {
+			out[i] = (uint8_t)midiTxBuffer[(uartItems[item].txBufferReadPos + i) & (PIC_TX_BUFFER_SIZE - 1)];
+		}
+		if (n > 0) {
+			sendto(midiSock, out, n, 0, (sockaddr*)&midiPeer, sizeof(midiPeer));
+			host_midi_bytes_out += n;
+		}
+	}
 	uartItems[item].txBufferReadPos = uartItems[item].txBufferWritePos;
 }
-int32_t uartGetTxBufferFullnessByItem(int32_t) {
-	return 0;
+int32_t uartGetTxBufferFullnessByItem(int32_t item) {
+	return (int32_t)txFullness(item);
 }
-int32_t uartGetTxBufferSpace(int32_t) {
-	return 1024;
+int32_t uartGetTxBufferSpace(int32_t item) {
+	return PIC_TX_BUFFER_SIZE - 1 - (int32_t)txFullness(item);
 }
 void uartSetBaudRate(uint8_t, uint32_t) {
 }

@@ -14,6 +14,12 @@ src = Path(sys.argv[1]) / "RZA1/system"
 out = Path(sys.argv[2]) / "RZA1/system"
 (out / "iodefines").mkdir(parents=True, exist_ok=True)
 
+def write(dest, text):
+    """Writes only a changed file, so the incremental build keeps its objects."""
+    if not dest.exists() or dest.read_text(errors="replace") != text:
+        dest.write_text(text)
+
+
 addr = re.compile(r"\b(0x(?:3F|E8|FC)[0-9A-Fa-f]{6})(uL|UL|u|U)?\b")
 for f in [src / "iodefine.h", *sorted((src / "iodefines").glob("*.h"))]:
     text = f.read_text(errors="replace")
@@ -27,11 +33,9 @@ for f in [src / "iodefine.h", *sorted((src / "iodefines").glob("*.h"))]:
         text = text.replace('#include "RZA1/system/r_typedefs.h"',
                             '#include "RZA1/system/r_typedefs.h"\n#include "host_io.h"')
     dest = out / f.relative_to(src)
-    dest.write_text(text)
-    if f.name != "iodefine.h":
-        dest.write_text('#include "host_io.h"\n' + text)
+    write(dest, text if f.name == "iodefine.h" else '#include "host_io.h"\n' + text)
 
 # The uncached mirror of on-chip RAM (+0x40000000) doesn't exist on the host: buffers are used at their own address.
 cpu = (Path(sys.argv[1]) / "RZA1/cpu_specific.h").read_text()
 cpu = re.sub(r"(#define UNCACHED_MIRROR_OFFSET\s+)0x40000000", r"\g<1>0", cpu)
-(Path(sys.argv[2]) / "RZA1/cpu_specific.h").write_text(cpu)
+write(Path(sys.argv[2]) / "RZA1/cpu_specific.h", cpu)

@@ -78,7 +78,14 @@ def compile_one(src, outdir, extra):
     base = CXX if src.suffix == ".cpp" else C
     cmd = base + COMMON + extra + PER_FILE.get(str(rel), [])
     cmd += [f"-I{p}" for p in INCLUDES] + [f"-isystem{p}" for p in SYSTEM_INCLUDES]
-    cmd += ["-c", str(src), "-o", str(obj)]
+    dep = obj.with_suffix(".d")
+    if obj.exists() and dep.exists() and not rel.parts[0] == "host":
+        # Incremental: rsync -a keeps the tree's mtimes, so an object newer than every file it read is up to date.
+        deps = dep.read_text().replace("\\\n", " ").split(":", 1)[1].split()
+        t = obj.stat().st_mtime
+        if all(os.path.exists(d) and os.path.getmtime(d) <= t for d in deps):
+            return str(rel), 0, 0
+    cmd += ["-MMD", "-MF", str(dep), "-c", str(src), "-o", str(obj)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     log.write_text(r.stderr)
     nerr = len(re.findall(r": (?:fatal )?error:", r.stderr))
@@ -93,11 +100,19 @@ def main():
     ap.add_argument("--set", default="all")
     ap.add_argument("--extra", action="append", default=[])
     ap.add_argument("--link", default=None, help="link every object into this executable")
+    ap.add_argument("--driver", default="render_preset", help="the host driver (spike/host/drivers/NAME.cpp) with main()")
+    ap.add_argument("--sysex-test", action="store_true", help="build with ENABLE_SYSEX_TEST (the test port)")
+    ap.add_argument("--capture", default=None,
+                    help="folder with a generative_capture.h: current_recipe.cpp builds with GENERATIVE_CAPTURE, "
+                         "as the firmware's GENERATIVE_CAPTURE_DIR does")
     a = ap.parse_args()
     outdir = Path(a.outdir)
     global FW, INCLUDES
     tree = outdir / "tree"
-    subprocess.run(["rsync", "-a", "--delete", f"{FW_ORIG}/src", f"{tree}/"], check=True)
+    # The generated register headers are left out, so gen_io_overrides.py can keep them (and their mtimes) unchanged.
+    subprocess.run(["rsync", "-a", "--delete", "--exclude", "/src/RZA1/system/iodefine.h",
+                    "--exclude", "/src/RZA1/system/iodefines/", "--exclude", "/src/RZA1/cpu_specific.h",
+                    f"{FW_ORIG}/src", f"{tree}/"], check=True)
     subprocess.run(["rsync", "-a", f"{OVERLAY}/src", f"{tree}/"], check=True)
     INCLUDES = [Path(str(p).replace(str(FW_ORIG), str(tree))) for p in INCLUDES]
     FW = tree
@@ -106,10 +121,18 @@ def main():
     subprocess.run([sys.executable, str(SPIKE / "scripts/gen_io_overrides.py"), str(FW_ORIG / "src"), str(tree / "src")],
                    check=True)
     (outdir / "obj").mkdir(parents=True, exist_ok=True)
+    for stale in (outdir / "obj").glob("host__*.o"):
+        stale.unlink()  # host objects are rebuilt each run, so another driver's main() never links
     (outdir / "log").mkdir(parents=True, exist_ok=True)
     srcs = sources(a.set)
     if a.set == "all":
         srcs += sorted(p for p in (SPIKE / "host").glob("*") if p.suffix in (".c", ".cpp"))
+        srcs.append(SPIKE / "host/drivers" / f"{a.driver}.cpp")
+    if a.sysex_test:
+        a.extra.append("-DENABLE_SYSEX_TEST=1")
+    if a.capture:
+        PER_FILE["src/deluge/generative/firmware/current_recipe.cpp"] = [
+            "-DGENERATIVE_CAPTURE=1", f"-I{Path(a.capture).resolve()}"]
     if a.only:
         srcs = [s for s in srcs if re.search(a.only, str(s))]
     if a.exclude:
