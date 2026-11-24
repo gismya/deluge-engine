@@ -111,7 +111,7 @@ How many ticks a read is worth is the virtual CPU speed:
 | 33 (default) | 1 µs | 1.95 s (31x) | |
 | 100 | 3 µs | 1.33 s (45x) | |
 | 330 | 10 µs | 0.62 s (96x) | same RMS |
-| 1000 | 30 µs | — | **entry never finishes** |
+| 1000 | 30 µs | never plays | entry never finishes |
 
 At 1000, the entry job ran once (`gen_mem before_entry`) and then never again: the scheduler spun with GENERATIVE's
 modal screen up. The likely cause: the job's measured run time no longer fits before the audio task's next deadline,
