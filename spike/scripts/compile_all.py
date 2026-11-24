@@ -61,15 +61,18 @@ def sources(set_name):
     if set_name in ("all", "deluge"):
         out += sorted(p for p in deluge.rglob("*") if p.suffix in (".c", ".cpp"))
     if set_name == "all":
-        for sub in ("OSLikeStuff", "fatfs", "lib", "NE10"):
+        for sub in ("OSLikeStuff", "fatfs", "lib"):
             out += sorted(p for p in (FW / "src" / sub).rglob("*") if p.suffix in (".c", ".cpp"))
+        # NE10: the sources src/NE10/CMakeLists.txt lists (minus its .s headers)
+        ne10 = (FW / "src/NE10/CMakeLists.txt").read_text()
+        out += [FW / "src/NE10" / m for m in re.findall(r"^\s+(\S+\.(?:c|cpp))\s*$", ne10, re.M)]
         out += [FW / "src" / f for f in ("main.c", "malloc.c", "terminate.cpp", "memmove.c", "cpp_handler.cpp", "sys_stubs.c")]
     out = [p for p in out if not any(re.search(e, str(p.relative_to(FW))) for e in EXCLUDE)]
     return out
 
 
 def compile_one(src, outdir, extra):
-    rel = src.relative_to(FW)
+    rel = src.relative_to(FW) if src.is_relative_to(FW) else Path("host") / src.name
     obj = outdir / "obj" / (str(rel).replace("/", "__") + ".o")
     log = outdir / "log" / (str(rel).replace("/", "__") + ".log")
     base = CXX if src.suffix == ".cpp" else C
@@ -89,6 +92,7 @@ def main():
     ap.add_argument("--exclude", default=None)
     ap.add_argument("--set", default="all")
     ap.add_argument("--extra", action="append", default=[])
+    ap.add_argument("--link", default=None, help="link every object into this executable")
     a = ap.parse_args()
     outdir = Path(a.outdir)
     global FW, INCLUDES
@@ -100,6 +104,8 @@ def main():
     (outdir / "obj").mkdir(parents=True, exist_ok=True)
     (outdir / "log").mkdir(parents=True, exist_ok=True)
     srcs = sources(a.set)
+    if a.set == "all":
+        srcs += sorted(p for p in (SPIKE / "host").glob("*") if p.suffix in (".c", ".cpp"))
     if a.only:
         srcs = [s for s in srcs if re.search(a.only, str(s))]
     if a.exclude:
@@ -115,6 +121,15 @@ def main():
         for r in bad:
             f.write(f"{r[2]:5d} {r[0]}\n")
     print(open(outdir / "summary.txt").read()[:4000])
+    if a.link and not bad:
+        objs = sorted(str(p) for p in (outdir / "obj").glob("*.o"))
+        r = subprocess.run(["/usr/bin/clang++", "-arch", "arm64", "-Wl,-dead_strip", *objs, "-o", a.link],
+                           capture_output=True, text=True)
+        (outdir / "link.log").write_text(r.stderr)
+        undef = sorted(set(re.findall(r'^\s+"([^"]+)", referenced from', r.stderr, re.M)))
+        print(f"link rc={r.returncode} undefined={len(undef)}")
+        for u in undef:
+            print("  ", u)
 
 
 if __name__ == "__main__":
