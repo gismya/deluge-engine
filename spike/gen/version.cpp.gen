@@ -1,0 +1,6 @@
+char const* kFirmwareVersionString = "1.3.0-host";
+char const* kFirmwareVersionStringShort = "c1.3.0";
+
+extern "C" {
+char const* kCommitShort = "host";
+}
