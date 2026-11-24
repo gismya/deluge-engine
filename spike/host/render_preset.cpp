@@ -20,6 +20,7 @@
 #include "storage/flash_storage.h"
 #include "storage/storage_manager.h"
 #include "util/functions.h"
+#include "fatfs/ff.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,15 @@
 extern uint32_t host_audio_tx_read_frame;
 extern int32_t ssiTxBuffer[];
 void setupBlankSong();
+
+// The OLED's freeze screen polls the PIC and DMA forever; on the host a freeze is fatal and reported.
+class HostDisplay final : public deluge::hid::display::OLED {
+public:
+	void freezeWithError(char const* text) override {
+		std::fprintf(stderr, "FREEZE_WITH_ERROR %s\n", text);
+		std::abort();
+	}
+};
 
 static InstrumentClip* linkIntoSong(Song* song, Instrument* instrument) {
 	void* memory = GeneralMemoryAllocator::get().allocMaxSpeed(sizeof(InstrumentClip));
@@ -81,13 +91,24 @@ int main(int argc, char** argv) {
 	functionsInit();
 	currentPlaybackMode = &session;
 	deluge::hid::display::have_oled_screen = true;
-	display = new deluge::hid::display::OLED;
+	display = new HostDisplay;
 	AudioEngine::init();
 	audioFileManager.init();
 	FlashStorage::readSettings();
 	runtimeFeatureSettings.init();
-	setupBlankSong();
 	std::fprintf(stderr, "booted: Cluster::size %d\n", (int)Cluster::size);
+	if (std::getenv("HOST_LS")) {
+		DIR d;
+		FILINFO fno;
+		FRESULT r = f_opendir(&d, std::getenv("HOST_LS"));
+		std::fprintf(stderr, "f_opendir %d\n", (int)r);
+		for (int n = 0; n < 8 && f_readdir(&d, &fno) == FR_OK && fno.fname[0]; n++) {
+			std::fprintf(stderr, "  [%s] attr %x size %llu\n", fno.fname, fno.fattrib, (unsigned long long)fno.fsize);
+		}
+		return 0;
+	}
+	setupBlankSong();
+	std::fprintf(stderr, "blank song set up\n");
 
 	FilePointer fp;
 	if (!StorageManager::fileExists(presetPath, &fp)) {
@@ -139,6 +160,8 @@ int main(int argc, char** argv) {
 		}
 		host_audio_tx_read_frame = (host_audio_tx_read_frame + step) % SSI_TX_BUFFER_NUM_SAMPLES;
 		AudioEngine::routine();
+		// The firmware's scheduler runs this as its own task: sample clusters are streamed from the card here.
+		audioFileManager.loadAnyEnqueuedClusters(128, false);
 	}
 	writeWav(argv[2], out);
 	int32_t peak = 0;

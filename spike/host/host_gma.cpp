@@ -21,7 +21,9 @@ uint32_t* headerOf(void* address) {
 GeneralMemoryAllocator::GeneralMemoryAllocator() : lock(false) {
 	for (auto& r : regions) {
 		r.name = "host";
+		r.cache_manager_ = nullptr;
 	}
+	regions[MEMORY_REGION_STEALABLE].cache_manager_ = &cacheManager;
 }
 
 void* GeneralMemoryAllocator::alloc(uint32_t requiredSize, bool, bool makeStealable, void*) {
@@ -79,8 +81,10 @@ uint32_t GeneralMemoryAllocator::extendRightAsMuchAsEasilyPossible(void* address
 void GeneralMemoryAllocator::checkStack(char const*) {
 }
 
-int32_t GeneralMemoryAllocator::getRegion(void*) {
-	return MEMORY_REGION_EXTERNAL;
+// Firmware code checks that a Cluster lives in the stealable region; the header type says where it "would" be.
+int32_t GeneralMemoryAllocator::getRegion(void* address) {
+	return (*headerOf(address) & SPACE_TYPE_MASK) == SPACE_HEADER_STEALABLE ? MEMORY_REGION_STEALABLE
+	                                                                         : MEMORY_REGION_EXTERNAL;
 }
 
 void GeneralMemoryAllocator::putStealableInQueue(Stealable*, StealableQueue) {

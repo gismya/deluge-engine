@@ -36,8 +36,8 @@ COMMON = [
     "-ferror-limit=0", "-fno-color-diagnostics", "-Wno-everything",
     # Downgrades clang's hard error on pointer-to-uint32_t casts to a warning (truncating at run time).
     "-fms-extensions",
-    # ELF section names (PLACE_SDRAM_BSS etc. in src/definitions.h) are invalid on Mach-O; aligned(1) is a no-op.
-    "-D__section__(x)=aligned(1)",
+    # ELF section names (PLACE_SDRAM_BSS etc. in src/definitions.h) are invalid on Mach-O; `unused` is a no-op. (aligned(1) is not: clang lowers the variable's alignment.)
+    "-D__section__(x)=unused",
     "-include", str(SPIKE / "host/force/host_prefix.h"),
 ]
 PER_FILE = {
@@ -101,6 +101,10 @@ def main():
     subprocess.run(["rsync", "-a", f"{OVERLAY}/src", f"{tree}/"], check=True)
     INCLUDES = [Path(str(p).replace(str(FW_ORIG), str(tree))) for p in INCLUDES]
     FW = tree
+    # Generated host versions of the RZ/A1 register headers replace the originals in the patched tree: quoted
+    # includes find a sibling (src/definitions.h -> "RZA1/cpu_specific.h") before any -I directory.
+    subprocess.run([sys.executable, str(SPIKE / "scripts/gen_io_overrides.py"), str(FW_ORIG / "src"), str(tree / "src")],
+                   check=True)
     (outdir / "obj").mkdir(parents=True, exist_ok=True)
     (outdir / "log").mkdir(parents=True, exist_ok=True)
     srcs = sources(a.set)
