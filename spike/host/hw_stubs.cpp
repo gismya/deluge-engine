@@ -201,7 +201,31 @@ bool host_midi_udp_open(int probeListen, int probeSend) {
 uint8_t uartGetChar(int32_t, char*) {
 	return 0;
 }
+// host_midi_inject(): MIDI bytes from the host itself (no UDP link), read by the firmware's DIN parser as if they came
+// in on the DIN port. A driver calls it from a firmware task (one thread).
+static uint8_t midiInject[4096];
+static uint32_t midiInjectHead = 0, midiInjectTail = 0;
+extern "C" bool host_midi_inject(const uint8_t* bytes, uint32_t n) {
+	if (midiInjectTail + n > sizeof(midiInject)) {
+		if (midiInjectHead != midiInjectTail) {
+			return false;
+		}
+		midiInjectHead = midiInjectTail = 0;
+	}
+	std::memcpy(midiInject + midiInjectTail, bytes, n);
+	midiInjectTail += n;
+	host_midi_bytes_in += n;
+	return true;
+}
 uint32_t* uartGetCharWithTiming(int32_t item, char* out) {
+	if (item == TIMING_CAPTURE_ITEM_MIDI && midiInjectHead != midiInjectTail) {
+		*out = (char)midiInject[midiInjectHead++];
+		if (midiInjectHead == midiInjectTail) {
+			midiInjectHead = midiInjectTail = 0;
+		}
+		midiRxTime = getTimerValue(0);
+		return &midiRxTime;
+	}
 	if (item != TIMING_CAPTURE_ITEM_MIDI || midiSock < 0) {
 		return nullptr;
 	}

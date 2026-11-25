@@ -1,0 +1,80 @@
+
+## 1. Routing: one instrument per channel
+
+    bind ch 1 SYNTHS/026 PW Organ.XML (outputs now 2): at 0.2002 s took 5.9 ms virtual, 0.2 ms wall; DMA played 264 frames meanwhile, 0 overruns
+    bind ch 2 SYNTHS/025 Soft Synth Organ.XML (outputs now 3): at 0.2061 s took 5.9 ms virtual, 0.3 ms wall; DMA played 259 frames meanwhile, 0 overruns
+    bind ch 10 KITS/000 TR-808.XML (outputs now 4): at 0.2120 s took 141.8 ms virtual, 4.2 ms wall; DMA played 6255 frames meanwhile, 0 overruns
+
+Each channel's notes with only its own preset bound (alone) vs with all three bound:
+  voice counts over the render (every change), alone / all bound:
+    ch  1: [1, 2, 1, 0] / [1, 2, 1, 0]
+    ch  2: [1, 2, 1, 0] / [1, 2, 1, 0]
+    ch 10: [1, 2, 1, 0, 1, 0, 1, 0] / [1, 2, 1, 0, 1, 0, 1, 0]
+  ch  1: signal  -25.5 dBFS; 50 ms level envelope differs by at most 0.06 dB (windows above -60 dBFS); sample difference -31.1 dBFS (the LFOs and render windows start at other times, so samples don't line up)
+  ch  2: signal  -28.5 dBFS; 50 ms level envelope differs by at most 0.22 dB (windows above -60 dBFS); sample difference -25.3 dBFS (the LFOs and render windows start at other times, so samples don't line up)
+  ch 10: signal  -27.4 dBFS; 50 ms level envelope differs by at most 0.28 dB (windows above -60 dBFS); sample difference -33.3 dBFS (the LFOs and render windows start at other times, so samples don't line up)
+  per note: f0 by autocorrelation 0.2-0.3 s after note-on, level 0.1-0.4 s, harmonics 1-8 (0.2-0.4 s), alone / all bound:
+    ch 1 note 45 (110.0 Hz): f0 110.1 / 110.1 Hz; level -21.5 / -21.5 dBFS; harmonics above -60 dBFS within 0.01 dB
+    ch 1 note 52 (164.8 Hz): f0 165.0 / 165.0 Hz; level -21.7 / -21.7 dBFS; harmonics above -60 dBFS within 0.19 dB
+    ch 2 note 63 (311.1 Hz): f0 622.3 / 622.2 Hz; level -23.6 / -23.5 dBFS; harmonics above -60 dBFS within 9.00 dB
+    ch 2 note 70 (466.2 Hz): f0 932.5 / 932.4 Hz; level -24.1 / -24.1 dBFS; harmonics above -60 dBFS within 3.37 dB
+  kit hits (ch 10), peak in the 50 ms after each note-on, alone / all bound:
+    note 36 at 1.2 s: -6.28 / -6.28 dBFS
+    note 38 at 1.7 s: -13.68 / -13.71 dBFS
+    note 42 at 2.2 s: -9.14 / -9.15 dBFS
+    note 36 at 2.7 s: -6.28 / -6.28 dBFS
+  crosstalk: each all-bound render's level at the other channel's f0, 0.2-0.4 s after that channel's note-on time:
+    622.3 Hz (ch 2's f0) in the ch 1 render: -78.7 dBFS (in ch 2's own: -25.4 dBFS)
+    110.1 Hz (ch 1's f0) in the ch 2 render: -189.0 dBFS (in ch 1's own: -25.1 dBFS)
+All notes together vs the sum of the three single-channel renders, 0.9-1.2 s (only ch 1 has played): difference -135.5 dBFS vs signal -23.4 dBFS (three dither floors vs one)
+  whole render: 50 ms level envelope within 0.14 dB of the sum
+Notes on unbound channels 5, 3, 16 vs no notes at all: whole render -141.5 dBFS (dither), difference -999.0 dBFS (max |diff| 0.00e+00); voices [0]
+
+## 2. Changing one binding while another channel holds a note
+
+- swap ch 2 -> SYNTHS/020 Soft Saw Lead.XML, card 300:40: swap from 2.0007 s took 4.8 ms virtual (0.6 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -27.79..-27.54 dBFS, within 0.07 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 331 Hz
+- swap ch 2 -> SYNTHS/020 Soft Saw Lead.XML, card 0:0: swap from 2.0010 s took 0.0 ms virtual (0.0 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -27.83..-27.57 dBFS, within 0.06 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: 2.004 s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 331 Hz
+- swap ch 2 -> SYNTHS/169 Double Bass.XML, card 300:40: swap from 2.0007 s took 328.3 ms virtual (18.3 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -28.02..-27.25 dBFS, within 0.47 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: 2.324 s; below -60 dBFS (1 ms windows) after the swap: 2.324-2.332 s (8 ms); new note f0 83 Hz
+- swap ch 2 -> SYNTHS/169 Double Bass.XML, card 0:0: swap from 2.0010 s took 0.1 ms virtual (0.6 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -28.14..-27.39 dBFS, within 0.40 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 83 Hz
+- swapx ch 2 -> SYNTHS/020 Soft Saw Lead.XML, card 300:40: swap from 2.0007 s took 4.8 ms virtual (0.1 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -27.81..-27.54 dBFS, within 0.02 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 331 Hz
+- swapx ch 2 -> SYNTHS/020 Soft Saw Lead.XML, card 0:0: swap from 2.0010 s took 0.0 ms virtual (0.1 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -27.83..-27.57 dBFS, within 0.03 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 330 Hz
+- swapx ch 2 -> SYNTHS/169 Double Bass.XML, card 300:40: swap from 2.0007 s took 319.7 ms virtual (7.5 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -28.96..-27.54 dBFS, within 1.22 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 83 Hz
+- swapx ch 2 -> SYNTHS/169 Double Bass.XML, card 0:0: swap from 2.0010 s took 0.1 ms virtual (0.7 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -28.18..-27.39 dBFS, within 0.45 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: None s; below -60 dBFS (1 ms windows) after the swap: never; new note f0 83 Hz
+- swap ch 2 -> SYNTHS/169 Double Bass.XML, card 300:40, a note sent during the load: swap from 2.0007 s took 328.3 ms virtual (8.4 ms wall); DMA overruns in the swap 0, after boot in the whole render 0
+    held ch 1 note: its 1761.7 Hz level 1.5-3.5 s stays -27.88..-27.54 dBFS, within 0.15 dB of the ch1-only render (100 ms Hann windows every 5 ms)
+    ch 2 alone: old note at -31 dBFS (1 ms median) until the swap; first 1 ms window 20 dB under that: 2.324 s; below -60 dBFS (1 ms windows) after the swap: 2.324-2.579 s (255 ms)
+    ch 2 alone, voice count changes 1.9-2.6 s: [(2, 2.0525), (0, 2.3303)]
+
+## 3. An audition instrument on channel 16, added and removed while others play
+
+    bind ch 1 SYNTHS/026 PW Organ.XML (outputs now 2): at 0.2002 s took 5.9 ms virtual, 0.1 ms wall; DMA played 264 frames meanwhile, 0 overruns
+    bind ch 10 KITS/000 TR-808.XML (outputs now 3): at 0.2061 s took 141.8 ms virtual, 3.1 ms wall; DMA played 6252 frames meanwhile, 0 overruns
+    bind ch 16 SYNTHS/131 Warm Strings.XML (outputs now 4): at 2.0010 s took 21.3 ms virtual, 0.5 ms wall; DMA played 945 frames meanwhile, 0 overruns
+    unbind ch 16 (outputs now 3): at 3.5000 s took 0.0 ms virtual, 0.0 ms wall; DMA played 5 frames meanwhile, 0 overruns
+- added and removed, no notes: samples identical to the never-added render until 2.004671201814059 s (ch 16's bind starts at 2.001 s)
+    held ch 1 note (1762 Hz): level within 0.50 dB of the never-added render, 1.5-4.5 s (100 ms Hann windows every 5 ms)
+    kicks every 250 ms from 1.0 s, lag against the never-added render (samples): [0, 0, 0, 0, 0, 50, 0, 0, 0, -50, 0, -25, -25, 25, 25, -25]
+    kick peaks within 0.07 dB; residual after the lag, worst kick: -32.7 dBFS (the 200 ms around a kick is about -16 dBFS)
+- added, played, removed: samples identical to the never-added render until 2.004671201814059 s (ch 16's bind starts at 2.001 s)
+    held ch 1 note (1762 Hz): level within 0.50 dB of the never-added render, 1.5-4.5 s (100 ms Hann windows every 5 ms)
+    kicks every 250 ms from 1.0 s, lag against the never-added render (samples): [0, 0, 0, 0, 0, 50, 0, 0, -50, -50, 0, 0, -50, 0, 0, 0]
+    kick peaks within 1.12 dB; residual after the lag, worst kick: -25.5 dBFS (the 200 ms around a kick is about -16 dBFS)
+Audition alone, 10 ms levels 2.4-3.7 s (note 2.5-3.0, unbind at 3.5): 2.40:-142 2.45:-142 2.50:-70 2.55:-40 2.60:-36 2.65:-34 2.70:-34 2.75:-34 2.80:-31 2.85:-28 2.90:-25 2.95:-23 3.00:-22 3.05:-24 3.10:-28 3.15:-32 3.20:-37 3.25:-41 3.30:-42 3.35:-42 3.40:-43 3.45:-45 3.50:-51 3.55:-141 3.60:-142 3.65:-141
+  1 ms levels at the unbind: 3.495:-45 3.496:-56 3.497:-44 3.498:-45 3.499:-48 3.500:-52 3.501:-44 3.502:-45 3.503:-52 3.504:-142 3.505:-141 3.506:-142
+  overruns after boot: ref 0, silent 0, played 0
