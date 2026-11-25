@@ -1,0 +1,54 @@
+# Nightly canary (spec §11): the Engine against the tip of the firmware's generative branch, not the pin. A failure
+# opens one issue labelled needs-triage (the orchestrator doesn't act on these); later failures comment on it.
+name: Canary
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Firmware at the tip of generative
+        id: tip
+        run: |
+          git -C firmware fetch --depth=1 origin generative
+          git -C firmware checkout --detach FETCH_HEAD
+          echo "sha=$(git -C firmware rev-parse --short=9 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Tools
+        run: brew install ninja
+      - name: Check
+        run: python3 tools/check.py
+      - name: Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-logs
+          path: build/check/*.log
+          retention-days: 14
+      - name: Report
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TIP: ${{ steps.tip.outputs.sha }}
+        run: |
+          body="The Engine fails against the tip of the firmware's \`generative\` ($TIP): $RUN_URL"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label needs-triage \
+            --search "Canary: in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label needs-triage \
+              --title "Canary: the Engine fails against generative" --body "$body"
+          fi

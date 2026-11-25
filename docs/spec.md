@@ -174,6 +174,8 @@ Each seam is a small PR to gismya/deluge-generative. The contents of S1 to S5 ar
 | S6 | Test-port lines `load synth PATH`, `load kit PATH` and `midi S D1 D2`, modelled on `load song`. Only under `ENABLE_SYSEX_TEST`. | the preset Reference in delugemu (§9) | F4 |
 | S7 | Test-port lines `next recipe …` that set the Recipe and Seed the next roll takes | choosing a Piece at run time (§6.1) | none: merged |
 
+**S3 was split.** Its `noteRowId` fix changes the ARM Release build, so it moved to F6 (#53, firmware PR #535), which waits for the user under §2. Until it is on the pin, E1 compiles the two files it fixes with `-ftrivial-auto-var-init=zero` (`docs/implementation-notes.md`).
+
 **S7 is delivered.** The firmware built it in gismya/deluge-generative#527 and #528, both merged (`generative` at ddeef7fad). It is not an Engine ticket. Its lines are documented in the firmware's `docs/generative/spec/21-testing.md` §21.3, and `gen_emu.py capture` sends the same lines.
 
 **Seams merge into `generative` directly,** under §2. A ticket that needs a seam is blocked until the seam's PR is merged and the pin has moved to a commit that contains it. There is no branch of unmerged seams and no `patches/` folder.
@@ -523,6 +525,7 @@ F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets 
 | F3 | #4 | S4: allocator-based S001 check | §4 | |
 | F4 | #5 | S6: test-port `load synth`, `load kit` and `midi` lines | §4, §9.1 | |
 | F5 | #22 | S5: split `deluge_main` (optional, the user merges it) | §3.4, §4 | |
+| F6 | #53 | S3b: the noteRowId fix (changes Release, the user merges it) | §4 | |
 | E1 | #6 | Build: CMake, submodule, in-place compile, check script, CI | §3.3, §11 | F1, F2, F3 |
 | E2 | #7 | Platform layer: virtual clock, scheduler startup, allocator, freezes | §3.4, §3.5 | E1 |
 | E3 | #8 | Card image: builder, sector device, read-time model, write overlay | §3.6 | E1 |

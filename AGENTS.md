@@ -19,7 +19,9 @@ deluge-engine builds the Deluge community firmware's sound code for macOS (Apple
 
 ## Checks
 
-The E1 ticket creates `tools/check.py`, which runs everything CI runs (spec §11). Run it before pushing. Until E1 lands, the spike builds with `python3 spike/scripts/compile_all.py build/host --link build/render_preset` on branch `spike/host-compile`.
+`python3 tools/check.py` runs everything CI runs (spec §11): the factory-content guard, the tool tests, the startup text-hash guard, the ASan+UBSan and release builds with their smoke renders, and the firmware's 64-bit `PointerKeyTests`. Run it before pushing. `--only STEP` runs some steps, `--firmware-dir PATH` builds against another firmware checkout, and its docstring lists the steps. Logs go to `build/check/`. Add each new test to it, with a timeout.
+
+- First time: `git submodule update --init firmware`. It needs cmake 3.25+ (and ninja, if you have it); without them on PATH it uses the firmware's dbt toolchain in `~/source/deluge-generative/toolchain/current`.
 
 - Merge a PR only when its CI is green, never while it is red.
 - Merge firmware seam PRs into `generative` only under the rules in spec §2: `sizediff` unchanged, **Run tests** green, one review pass.
