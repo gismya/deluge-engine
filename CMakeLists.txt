@@ -124,18 +124,20 @@ set(FW_DEFINES ENABLE_SYSEX_TEST=1 DELUGE_HOST=1 USE_TASK_MANAGER _GNU_SOURCE)
 set(FW_FLAGS
   -ffast-math -fsigned-char -ffp-contract=off
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti;-fno-threadsafe-statics>"
-  # The firmware's own cpu_specific.h must stay a no-op behind the host one (host_prefix.h): if its body were ever
-  # read, its UNCACHED_MIRROR_OFFSET would redefine the host's.
-  -Werror=macro-redefined
   -include "${CMAKE_CURRENT_SOURCE_DIR}/engine/platform/host_prefix.h")
 # A pointer truncation must fail the build (seam S1; no -fms-extensions). In C++ clang already makes those errors;
 # these make the C ones errors too.
 set(CAST_ERRORS -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast
   -Werror=void-pointer-to-int-cast -Werror=int-to-void-pointer-cast)
-# Warnings in firmware sources aren't ours to fix here: off for the firmware target only.
-set(FW_PRIVATE_FLAGS -Wno-everything ${CAST_ERRORS})
+# The firmware's own cpu_specific.h must stay a no-op behind the host one (host_prefix.h): if its body were ever
+# read, its UNCACHED_MIRROR_OFFSET would redefine the host's. Clang applies warning flags in order, so this must come
+# after -Wno-everything to survive it.
+set(GUARD_ERRORS -Werror=macro-redefined)
+# Warnings in firmware sources aren't ours to fix here: off for the firmware target only, except the guard and cast
+# errors, which come after -Wno-everything.
+set(FW_PRIVATE_FLAGS -Wno-everything ${GUARD_ERRORS} ${CAST_ERRORS})
 # The Engine's own code keeps its warnings. Firmware headers count as system headers there (firmware's SYSTEM).
-set(ENGINE_WARNINGS -Wall -Wextra -Wno-unused-parameter -Wno-overriding-option ${CAST_ERRORS})
+set(ENGINE_WARNINGS -Wall -Wextra -Wno-unused-parameter -Wno-overriding-option ${GUARD_ERRORS} ${CAST_ERRORS})
 set(FW_INCLUDES
   "${GEN}/host"             # generated RZ/A1 headers win over the firmware's
   "${CMAKE_CURRENT_SOURCE_DIR}/engine/platform"

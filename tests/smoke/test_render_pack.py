@@ -8,6 +8,7 @@ fat_image.py (scripts/generative) writes the preset onto it. E3 replaces this wi
 
 import math
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -46,7 +47,9 @@ def format_via_device(path):
     """macOS 26's newfs_msdos won't format a plain file ("Cannot get partition offset"). Attached as a raw disk
     image with no mount, the same file is a device it formats; detached again whatever happens."""
     out = run_checked(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", str(path)])
-    device = out.split()[0]  # /dev/diskN
+    device = out.split()[0] if out.split() else ""
+    if not re.fullmatch(r"/dev/disk\d+", device):
+        raise RuntimeError(f"hdiutil attach gave no /dev/diskN device:\n{out}")
     try:
         run_checked(["newfs_msdos", "-F", "32", "-c", "64", "-v", "DELUGE", device.replace("/dev/disk", "/dev/rdisk")])
     finally:
@@ -57,14 +60,18 @@ def make_card(path, via_device=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         f.truncate(CARD_MIB * 1024 * 1024)  # sparse: a few MB on disk
-    try:
-        if via_device:
-            raise RuntimeError("asked for the device route")
-        # 32 KiB clusters (-c 64), the geometry given because a plain file has none.
-        run_checked(["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255",
-                     "-u", "63", "-o", "0", "-v", "DELUGE", str(path)])
-    except RuntimeError:
+    if via_device:
         format_via_device(path)
+    else:
+        try:
+            # 32 KiB clusters (-c 64), the geometry given because a plain file has none.
+            run_checked(["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255",
+                         "-u", "63", "-o", "0", "-v", "DELUGE", str(path)])
+        except RuntimeError as e:
+            # Only the known macOS 26 refusal takes the device route; any other failure is a real one.
+            if "Cannot get partition offset" not in str(e):
+                raise
+            format_via_device(path)
     with fat_image.FatImage(str(path)) as card:
         card.write_file(PRESET, (FIRMWARE / "pack" / PRESET).read_bytes())
 
