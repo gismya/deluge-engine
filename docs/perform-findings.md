@@ -1,7 +1,7 @@
 # Perform in the Engine: findings (issue #17)
 
 Firmware: gismya/deluge-generative `generative` at 4a64f701b (read-only worktree, not edited). Spike code: branch
-`task/perform-in-engine` (from `spike/host-compile`). Paths under `spike/` are on that branch; firmware paths are under
+`task/perform-in-engine` (from `spike/host-compile`). Paths under `spike/` are on branch `task/perform-in-engine`; firmware paths are under
 `src/deluge/` of the firmware.
 
 ## Answer: yes

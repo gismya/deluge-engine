@@ -1,7 +1,7 @@
 # Setups in memory: findings (issue #42)
 
 Firmware: gismya/deluge-generative `generative` at 4a64f701b (own worktree, not edited). Spike code: branch
-`spike/setup-routing`, from `task/perform-in-engine`. Paths under `spike/` are on this branch; firmware paths are
+`spike/setup-routing`, from `task/perform-in-engine`. Paths under `spike/` are on branch `spike/setup-routing`; firmware paths are
 under `src/deluge/` of the firmware. Full output of the checks: [setup-results.txt](https://github.com/gismya/deluge-engine/blob/spike/setup-routing/spike/setup-results.txt).
 
 ## Answer: route 1 works, with no firmware change
@@ -145,8 +145,6 @@ None. Possible seams, none needed now:
   defines `snprintf` as a macro (`snprintf_`). Use plain `snprintf`.
 - No numpy on the system Python, so the checks are pure Python. All three sections run in about 10 s.
 
-There's no `docs/implementation-notes.md` on this branch (it comes from `spike/host-compile`). The traps above belong
-there once the Setups ticket starts on `main`.
 
 ## Recommendation for the Setups ticket
 
