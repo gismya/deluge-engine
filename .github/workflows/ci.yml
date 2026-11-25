@@ -1,4 +1,6 @@
 # Engine CI (spec §11): tools/check.py on a macOS arm64 runner, which is what agents run before pushing.
+# The firmware needs Apple clang 21 or newer (P2280; docs/implementation-notes.md): the macos-26 image with Xcode
+# 26.6 selected explicitly, so an image update doesn't change the compiler under us.
 name: CI
 
 on:
@@ -14,7 +16,7 @@ concurrency:
 jobs:
   engine:
     name: ${{ matrix.name }}
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -30,9 +32,22 @@ jobs:
           submodules: true
       - name: Tools
         run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          clang --version
           brew install ninja
           cmake --version
-          clang --version
+      # The compiler guard in CMakeLists.txt: an Apple clang 17 (Xcode 26.0.1) configure must stop at once with
+      # its message. Skipped if the image drops that Xcode.
+      - name: Compiler guard
+        if: strategy.job-index == 0
+        run: |
+          old=/Applications/Xcode_26.0.1.app/Contents/Developer
+          if [ ! -d "$old" ]; then echo "no Xcode 26.0.1 on this image: skipped"; exit 0; fi
+          DEVELOPER_DIR=$old xcrun clang --version
+          if DEVELOPER_DIR=$old cmake -S . -B build/old-compiler > old.log 2>&1; then
+            echo "configure with Apple clang 17 should have failed"; cat old.log; exit 1
+          fi
+          grep "is too old for the firmware" old.log
       - name: Check
         run: python3 tools/check.py --only ${{ matrix.steps }}
       # Logs only: never audio or card images (AGENTS.md, spec §2).

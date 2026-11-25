@@ -26,6 +26,27 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Git REQUIRED)
 
+# The firmware needs a compiler that implements P2280 (references with unknown values in constant expressions):
+# enum_to_string_map.hpp static_asserts on std::size() of a reference parameter. Apple clang 21 builds it; Apple
+# clang 17 (Xcode 16.x and early 26.x) doesn't (docs/implementation-notes.md). Probe the construct itself, so an old
+# compiler fails here with this message instead of deep in gui/ui/ui.cpp.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-std=gnu++23")
+check_cxx_source_compiles([=[
+#include <array>
+#include <cstddef>
+template <std::size_t N> struct Probe {
+  constexpr Probe(const std::array<int, N>& init) { static_assert(N == std::size(init)); }
+};
+int main() { constexpr std::array<int, 2> a{1, 2}; Probe<2> p(a); (void)p; }
+]=] DELUGE_COMPILER_HAS_P2280)
+unset(CMAKE_REQUIRED_FLAGS)
+if(NOT DELUGE_COMPILER_HAS_P2280)
+  message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} is too old for the firmware: it doesn't "
+    "implement P2280 (unknown references in constant expressions). Use Apple clang 21 or newer (Xcode 26.6 has it); "
+    "see docs/implementation-notes.md.")
+endif()
+
 # The argon and etl pins come from the firmware's own list (spec §3.3), not repeated here. Both build configurations
 # share one download folder.
 include(FetchContent)
