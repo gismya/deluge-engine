@@ -6,7 +6,8 @@ Terms are in [GLOSSARY.md](../GLOSSARY.md). Generative-mode terms (Piece, Recipe
 
 Background:
 - [spike-findings.md](spike-findings.md): the spike that rendered factory presets, on branch `spike/host-compile`.
-- `spike/perform-findings.md` on branch `task/perform-in-engine`: Perform running in the Engine.
+- [perform-findings.md](perform-findings.md): Perform running in the Engine, spike code on branch `task/perform-in-engine`.
+- [setup-findings.md](setup-findings.md): Setups built in memory, spike code on branch `spike/setup-routing`.
 - `research/gui-toolkit.md` on branch `research/gui-toolkit`: the toolkit comparison.
 - `prototype/screens/` on branch `prototype/screens` (commit f0b02bf): the reference design for the GUI.
 - The decisions: [the map](https://github.com/gismya/deluge-engine/issues/15) and its tickets #16 to #21.
@@ -183,7 +184,7 @@ Firmware rules apply to these PRs: the firmware's `AGENTS.md` (hooks, `git delug
 
 A Setup is a list of bindings. Each binding is a MIDI channel (1 to 16) and a Synth or Kit preset path. The Engine plays all of them at once from MIDI: a message on channel c from any input goes to the preset bound to c. A channel with no binding is ignored.
 
-The spike in [#42](https://github.com/gismya/deluge-engine/issues/42) proved this with no firmware change. Its findings are `spike/setup-findings.md` on branch `spike/setup-routing` (f13436f), and its driver is `spike/host/drivers/setup_engine.cpp`. A second route, a song file per Setup through `load song`, wasn't needed.
+The spike in [#42](https://github.com/gismya/deluge-engine/issues/42) proved this with no firmware change. Its findings are [setup-findings.md](setup-findings.md), with the spike code on branch `spike/setup-routing` (f13436f), and its driver is `spike/host/drivers/setup_engine.cpp`. A second route, a song file per Setup through `load song`, wasn't needed.
 
 - **In the firmware,** a Setup lives in the running song, built by host code with the firmware's own calls. MIDI follow is off, and the blank song's default clip is dropped.
 - **Building a binding:**
@@ -581,6 +582,6 @@ The user is away for about a week, and an orchestrator runs the tickets. It foll
 4. Hangs. Every test has a timeout, and freezes abort.
 5. Setup changes running inside one another. A preset load re-enters host tasks, so the command queue needs its guard (§5).
 6. The firmware moving under the pin. Don't move the pin during the run except to take a merged seam.
-7. Two orchestrators on one machine. The firmware's own milestone run may share `generative` and the emulator slot pool. Expect merge conflicts on F1 and slow `check_all.py` runs. Whoever merges second brings their branch up to date first.
+7. Two orchestrators on one machine. The firmware's own milestone run may share `generative` and the CPU (see the orchestration doc's "Shared machine"). Expect merge conflicts on F1 and slow `check_all.py` runs. Whoever merges second brings their branch up to date first.
 
 **When the user is back** they read the state file's top section: what merged, what is open, the questions, the Parity report and the listening pack's path, and which defaults and fallbacks the run took.
