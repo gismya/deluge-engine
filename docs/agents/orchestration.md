@@ -5,8 +5,7 @@ For the agent that runs the tickets in [spec §13](../spec.md#13-order-of-work-a
 ## Before the first ticket
 
 - Read [spec §14](../spec.md#14-running-unattended). The run never stops as a whole: a problem parks one ticket.
-- Check that the spec revision's PR is merged. A section still marked **Under review** is built as written.
-- E11 waits for the spike in [#42](https://github.com/gismya/deluge-engine/issues/42). If #42 is still open when E11 is the next free ticket, skip E11 and say so in the state file.
+- Check that the spec revision's PR is merged.
 
 ## Differences from the firmware's rules
 

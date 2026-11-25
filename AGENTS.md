@@ -11,7 +11,6 @@ deluge-engine builds the Deluge community firmware's sound code for macOS (Apple
 - **Factory content.** The factory card at `~/source/delugemu-sd/sdcard/` (and its image `~/source/delugemu-sd/deluge_sd.img`) has no licence. Never commit it, renders of it or excerpts of it, and never upload it, not even as a CI artifact. CI uses CC0 content only (spec §2).
 - **No speakers.** Never play audio through the user's speakers from an agent shell. Run the Engine and the app with `--audio null`.
 - **No listening verdicts.** Never claim two sounds are "not audibly different", and never loosen a Parity tolerance (spec §9.5).
-- A section of the spec marked **Under review** is still what you build.
 - **Timeouts.** Give every run of the engine or delugemu a timeout. Firmware freezes can hang forever.
 - Issues live in GitHub Issues on gismya/deluge-engine. Use the labels `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 - Running a milestone with subagents: read [docs/agents/orchestration.md](docs/agents/orchestration.md).

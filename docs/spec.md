@@ -11,7 +11,7 @@ Background:
 - `prototype/screens/` on branch `prototype/screens` (commit f0b02bf): the reference design for the GUI.
 - The decisions: [the map](https://github.com/gismya/deluge-engine/issues/15) and its tickets #16 to #21.
 
-The user answered the review on [#20](https://github.com/gismya/deluge-engine/issues/20), and this spec has the answers. One note still starts **Under review**: Setup routing (§5), which waits for the spike in [#42](https://github.com/gismya/deluge-engine/issues/42). Until it answers, build what the section says.
+The user answered the review on [#20](https://github.com/gismya/deluge-engine/issues/20), and this spec has the answers.
 
 ## 1. Goals and non-goals
 
@@ -142,7 +142,7 @@ The firmware's probe times its expects by the wall clock, so script runs need `-
 - The engine thread copies finished frames from the 128-frame SSI ring into a lock-free FIFO and sleeps when the FIFO is at its target (default 512 frames).
 - The **audio backend** only drains the FIFO. CoreAudio does it from its callback. The null backend does it from a timer and throws the frames away, or writes them to a file for tests. Latency is the FIFO target, plus up to 128 ring frames, plus the device buffer.
 - **MIDI in:** the CoreMIDI callback pushes bytes onto a single-producer queue, and the engine thread feeds them to the DIN UART stand-in. v1 delivers each event at once, so timing jitters by up to one buffer.
-- **Commands** from the protocol go on a queue. A host task registered with the firmware scheduler drains it. It skips a turn while `sdRoutineLock` is set, as `test_port.cpp` does for its own lines. Other threads read state from snapshots the engine thread publishes.
+- **Commands** from the protocol go on a queue. A host task registered with the firmware scheduler drains it, one command at a time: it never starts a command while another is running, because a preset load yields to the scheduler and the task runs again (§5). It skips a turn while `sdRoutineLock` is set, as `test_port.cpp` does for its own lines. Other threads read state from snapshots the engine thread publishes.
 - **The player** plays a WAV file by path, a Render or an auditioned sample, and mixes it into the output after the FIFO. It doesn't go through the firmware (§6.5), so it works before the firmware runs live.
 - **Watchdog.** A separate thread watches the engine thread. If no audio frame was produced for 2 s of wall time while the backend wanted frames, it reports a freeze with code `HANG` and exits the process.
 
@@ -183,17 +183,22 @@ Firmware rules apply to these PRs: the firmware's `AGENTS.md` (hooks, `git delug
 
 A Setup is a list of bindings. Each binding is a MIDI channel (1 to 16) and a Synth or Kit preset path. The Engine plays all of them at once from MIDI: a message on channel c from any input goes to the preset bound to c. A channel with no binding is ignored.
 
-- **In the firmware,** a Setup is a song in memory with one instrument per binding. Each instrument's MIDI input is learned to its channel (`Instrument::midiInput`, the field the firmware saves as `inputMidiChannel`). Each instrument needs an active clip, or it ignores note input (`melodic_instrument.cpp:531`).
-- **Building it.** Two routes. The spike in [#42](https://github.com/gismya/deluge-engine/issues/42) picks one, and E11 builds the one it picks.
-  1. Host code adds a clip and its instrument to the running song for each binding, with the firmware's own functions, and sets `midiInput`. Changing one binding touches only that instrument, so the others keep sounding.
-  2. The Engine writes a song file with one clip per binding into the card overlay (§3.6) and loads it with `load song`. Every Setup change then reloads the song, with a gap in the sound.
-- **Changes.** The GUI sends the whole Setup each time (§7.3). The Engine compares it with what is loaded and changes only the bindings that differ.
-- **Errors per binding:** a missing file, a preset that fails to load, a missing sample. The other bindings still load.
-- **A Kit** on a channel maps notes to its drums the way the firmware maps a Kit learned to a channel (`Kit::receivedNoteForKit`).
-- **A single preset** in the CLI (`--preset PATH`) is routed by MIDI follow from any channel, set up as the test port's `hold midi_setup` does.
-- **Audition** uses a 17th instrument that is in no binding. `Audition{path, note}` loads the preset there if it isn't the one loaded, and plays the note for the given time. The Setup is unchanged. For a `.wav` path (a lane's sample), the player plays the file from the card folder.
+The spike in [#42](https://github.com/gismya/deluge-engine/issues/42) proved this with no firmware change. Its findings are `spike/setup-findings.md` on branch `spike/setup-routing` (f13436f), and its driver is `spike/host/drivers/setup_engine.cpp`. A second route, a song file per Setup through `load song`, wasn't needed.
 
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 5):** nothing has tested several instruments in one in-memory song yet. [#42](https://github.com/gismya/deluge-engine/issues/42) tests it, and this section is finalised from its answer.
+- **In the firmware,** a Setup lives in the running song, built by host code with the firmware's own calls. MIDI follow is off, and the blank song's default clip is dropped.
+- **Building a binding:**
+  1. Load the preset.
+  2. Give it an always-active session clip, linked the way Generative mode's `link()` does it in `perform_song.cpp`.
+  3. Set its MIDI input (`Instrument::midiInput`) to the channel, with no device, so any input matches.
+  4. For a Kit, also set the first-row note to 36. Note 36 then plays the first drum, 37 the second, and so on.
+- **One change at a time.** Setup changes run on the engine thread, one after another. A preset load yields to the scheduler, which runs host tasks again, so the command queue must never start a command while another is running.
+- **Changing a binding:** load the new preset beside the old one, move the binding to it, release the old preset's notes, and free the old preset after its tail (2 s). That leaves no gap, and notes held on other channels are unaffected. Don't use `Song::replaceInstrument`: it cuts the old notes dead, which clicks.
+- **MIDI during a load** reaches the old preset, and those notes are released with it. A held note doesn't carry over to the new preset. Both are accepted.
+- **Changes from the GUI.** The GUI sends the whole Setup each time (§7.3). The Engine compares it with what is loaded and changes only the bindings that differ.
+- **Errors per binding:** a missing file, a preset that fails to load, a missing sample. The other bindings still load.
+- **A single preset** in the CLI (`--preset PATH`) is routed by MIDI follow from any channel, set up as the test port's `hold midi_setup` does. It exists before Setups do (E4).
+- **Audition** uses one more instrument, built like a binding, on the highest channel that has no binding. The Engine sends it the note itself. `Audition{path, note}` loads the preset there if it isn't the one loaded, and plays the note for the given time. Adding and removing it doesn't disturb the Setup. Release its notes and wait out the tail before removing it, or the tail is cut. With all 16 channels bound, `Audition` of a preset answers with an error. For a `.wav` path (a lane's sample), the player plays the file from the card folder.
+- **Comparing renders:** compare levels, not samples. Note timing shifts by up to about a millisecond after a long command, and free-running oscillators differ from run to run.
 
 ## 6. Pieces
 
@@ -546,7 +551,7 @@ F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets 
 | G6 | #50 | GUI: peak voice count and its threshold setting | §8, §10 | G3 |
 | G7 | #51 | End-to-end test of Setups and a restart | §11 | G2, G5, E12 |
 
-E11 is also blocked by the spike [#42](https://github.com/gismya/deluge-engine/issues/42), which is not a v1 ticket. The first spec's E8 (song-level FX set from the host, #13) is closed. E18 replaces it, and [#41](https://github.com/gismya/deluge-engine/issues/41) holds host-set song FX for a later release.
+The first spec's E8 (song-level FX set from the host, #13) is closed. E18 replaces it, and [#41](https://github.com/gismya/deluge-engine/issues/41) holds host-set song FX for a later release.
 
 ## 14. Running unattended
 
@@ -574,7 +579,7 @@ The user is away for about a week, and an orchestrator runs the tickets. It foll
 2. Preset swapping. The spike only ever loaded one preset per run.
 3. Parity turning into a bit-exactness chase. The tolerances are the bar.
 4. Hangs. Every test has a timeout, and freezes abort.
-5. Setups: several instruments in one in-memory song is untested (§5).
+5. Setup changes running inside one another. A preset load re-enters host tasks, so the command queue needs its guard (§5).
 6. The firmware moving under the pin. Don't move the pin during the run except to take a merged seam.
 7. Two orchestrators on one machine. The firmware's own milestone run may share `generative` and the emulator slot pool. Expect merge conflicts on F1 and slow `check_all.py` runs. Whoever merges second brings their branch up to date first.
 
