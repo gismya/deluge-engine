@@ -1,9 +1,8 @@
-// PROTOTYPE — renders each variant's main states to PNG (with the real fonts) so the screens can be
+// PROTOTYPE — renders the design's main states to PNG (with the real fonts) so the screens can be
 // looked at without running the app: flutter test --update-goldens test/screens_test.dart
-// Set ONLY=D to render one variant.
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:screens_prototype/data.dart';
@@ -17,50 +16,23 @@ Future<void> _font(String family, List<String> files) async {
   await loader.load();
 }
 
-/// A named state: what to do to the model (and the widgets) before the picture is taken.
-typedef Shot = ({String name, Future<void> Function(WidgetTester t, Model m) arrange});
+/// The Piece mid-comparison: a second Sound pick changed since A, A playing at 0:37.
+void _piece(Model m, PieceTab tab, {required bool picker}) {
+  m.setTab(tab);
+  m.setPicker(picker);
+  m.selectSlot('DRONE');
+  m.setPick('DRONE', synth('126 Dark FM Pad'));
+  m.play(m.slotA);
+  m.seek(0.62);
+}
 
-Future<void> _nothing(WidgetTester t, Model m) async {}
-
-final shots = <String, List<Shot>>{
-  'B2': [
-    (name: 'piece', arrange: _nothing),
-    (name: 'setup', arrange: (t, m) async => m.setMode(Mode.setup)),
-    (
-      name: 'ab',
-      arrange: (t, m) async {
-        m.selectSlot('DRONE');
-        m.setPick('DRONE', synth('126 Dark FM Pad'));
-        m.play(m.slotA);
-        m.seek(0.62);
-      }
-    ),
-  ],
-  'D': [
-    (name: 'piece', arrange: _nothing),
-    (name: 'setup', arrange: (t, m) async => m.setMode(Mode.setup)),
-    (
-      name: 'ab',
-      arrange: (t, m) async {
-        m.selectSlot('DRONE');
-        m.setPick('DRONE', synth('126 Dark FM Pad'));
-        m.play(m.slotA);
-        m.seek(0.62);
-      }
-    ),
-  ],
-  'E': [
-    (name: 'piece', arrange: _nothing),
-    (name: 'setup', arrange: (t, m) async => m.setMode(Mode.setup)),
-    (
-      name: 'ab',
-      arrange: (t, m) async {
-        m.play(m.slotA);
-        m.seek(0.62);
-      }
-    ),
-    (name: 'picker', arrange: (t, m) async => m.setPicker(true)),
-  ],
+/// A named state: what to do to the model before the picture is taken.
+final shots = <String, void Function(Model m)>{
+  'setup': (m) => m.setMode(Mode.setup),
+  'compare': (m) => _piece(m, PieceTab.compare, picker: false),
+  'compare-picker': (m) => _piece(m, PieceTab.compare, picker: true),
+  'timeline': (m) => _piece(m, PieceTab.timeline, picker: false),
+  'timeline-picker': (m) => _piece(m, PieceTab.timeline, picker: true),
 };
 
 void main() {
@@ -70,35 +42,20 @@ void main() {
     await _font('MaterialIcons', ['$material/MaterialIcons-Regular.otf']);
   });
 
-  final only = Platform.environment['ONLY'];
-  for (final v in variants) {
-    if (only != null && only != v) continue;
-    for (final shot in shots[v]!) {
-      // Desktop (mouse): every state dark at both sizes, light once at the large size.
-      // Tablet (touch, 48 dp targets): every state dark in landscape and portrait, light once.
-      for (final (size, dark, touch) in [
-        (const Size(1440, 900), true, false),
-        (const Size(1100, 720), true, false),
-        (const Size(1440, 900), false, false),
-        (const Size(1280, 800), true, true),
-        (const Size(800, 1280), true, true),
-        (const Size(1280, 800), false, true),
-      ]) {
-        final file = '$v-${shot.name}-${touch ? 'tablet-' : ''}${dark ? 'dark' : 'light'}-${size.width.toInt()}x${size.height.toInt()}';
-        testWidgets(file, (tester) async {
-          debugDisableShadows = false; // draw the palette's real shadow
-          tester.view.physicalSize = size;
-          tester.view.devicePixelRatio = 1;
-          addTearDown(tester.view.reset);
-          await tester.pumpWidget(PrototypeApp(initialVariant: v, dark: dark, touch: touch, showSwitcher: false));
-          final model = tester.state<PrototypeAppState>(find.byType(PrototypeApp)).model;
-          await shot.arrange(tester, model);
-          await tester.pump();
-          await tester.pump(const Duration(milliseconds: 50));
-          await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/$file.png'));
-          debugDisableShadows = true;
-        });
-      }
+  for (final shot in shots.entries) {
+    // A Mac window large and small, and a tablet in landscape and portrait. One theme, one density.
+    for (final size in const [Size(1440, 900), Size(1100, 720), Size(1280, 800), Size(800, 1280)]) {
+      final file = '${shot.key}-${size.width.toInt()}x${size.height.toInt()}';
+      testWidgets(file, (tester) async {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(const PrototypeApp());
+        shot.value(tester.state<PrototypeAppState>(find.byType(PrototypeApp)).model);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/$file.png'));
+      });
     }
   }
 }

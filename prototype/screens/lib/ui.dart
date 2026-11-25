@@ -1,13 +1,15 @@
-// PROTOTYPE — throwaway. The small design system the three variants share: colour tokens for a dark
-// and a light theme, a type scale on Inter, and a handful of components (buttons, segmented control,
+// PROTOTYPE — throwaway. The small design system of the round-3 screens: colour tokens for the one
+// dark theme, a type scale on Inter, and a handful of components (buttons, segmented control,
 // search field, preset row, waveform, meters, keyboard, engine status).
 //
-// Rules: one accent colour; surfaces differ by a step of grey and a hairline border, never a shadow
-// or a heavy card; spacing on a 4/8 grid; rows 28–40 px high; numbers in tabular figures.
+// Rules: dark only, and sized for a finger on every platform, macOS included, because the app is
+// used live. Every target is at least 48 dp and no action hides behind a hover. One accent colour;
+// surfaces differ by a step of grey and a hairline border, never a shadow or a heavy card; spacing
+// on a 4/8 grid; numbers in tabular figures.
 
 import 'dart:math';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
 import 'data.dart';
@@ -17,7 +19,6 @@ import 'data.dart';
 
 class Tk extends ThemeExtension<Tk> {
   const Tk({
-    required this.dark,
     required this.bg0,
     required this.bg1,
     required this.bg2,
@@ -32,11 +33,8 @@ class Tk extends ThemeExtension<Tk> {
     required this.ok,
     required this.warn,
     required this.err,
-    this.touch = false,
   });
 
-  final bool dark;
-  final bool touch; // a touch screen: 48 dp targets, actions always visible, no key hints
   final Color bg0; // the window
   final Color bg1; // panels
   final Color bg2; // hover, inset controls
@@ -53,7 +51,6 @@ class Tk extends ThemeExtension<Tk> {
   final Color err;
 
   static const night = Tk(
-    dark: true,
     bg0: Color(0xFF0D0E10),
     bg1: Color(0xFF131417),
     bg2: Color(0xFF1B1D21),
@@ -70,63 +67,40 @@ class Tk extends ThemeExtension<Tk> {
     err: Color(0xFFF2635F),
   );
 
-  static const day = Tk(
-    dark: false,
-    bg0: Color(0xFFF4F4F6),
-    bg1: Color(0xFFFFFFFF),
-    bg2: Color(0xFFEFEFF2),
-    bg3: Color(0xFFE4E4E9),
-    line: Color(0xFFE4E5E9),
-    lineStrong: Color(0xFFCDCFD6),
-    text: Color(0xFF15171C),
-    text2: Color(0xFF595E69),
-    text3: Color(0xFF8A8F99),
-    accent: Color(0xFF5350E0),
-    onAccent: Color(0xFFFFFFFF),
-    ok: Color(0xFF1F9D63),
-    warn: Color(0xFFB7791F),
-    err: Color(0xFFD9423E),
-  );
-
   static Tk of(BuildContext context) => Theme.of(context).extension<Tk>()!;
 
-  Tk withTouch(bool v) => Tk(dark: dark, bg0: bg0, bg1: bg1, bg2: bg2, bg3: bg3, line: line, lineStrong: lineStrong, text: text, text2: text2, text3: text3, accent: accent, onAccent: onAccent, ok: ok, warn: warn, err: err, touch: v);
-
-  // Sizes that change with the input: a mouse gets dense rows, a finger gets 48 dp.
-  double get top => touch ? 56 : 44; // the top bar
-  double get bar => touch ? 64 : 48; // a toolbar under it
-  double get row => touch ? 48 : 36; // a strip
-  double get listRow => touch ? 48 : 28; // a preset in a list
-  double get ctl => touch ? 40 : 28; // a button, drawn; its hit area is 48 on touch
-  double get _up => touch ? 1 : 0;
+  // Sizes. Nothing you can press is smaller than 48 dp, see [hitBox].
+  double get top => 56; // the top bar
+  double get bar => 72; // a toolbar under it
+  double get row => 48; // a row in a list or a table
+  double get ctl => 44; // a button as drawn; its hit area is 48
 
   /// The accent as a tint for selected rows.
-  Color get accentSoft => accent.withValues(alpha: dark ? 0.14 : 0.10);
-  Color get accentLine => accent.withValues(alpha: dark ? 0.55 : 0.5);
+  Color get accentSoft => accent.withValues(alpha: 0.14);
+  Color get accentLine => accent.withValues(alpha: 0.55);
 
   static const _tab = [FontFeature.tabularFigures()];
 
-  TextStyle get body => TextStyle(fontSize: 13 + _up, height: 18 / 13, fontWeight: FontWeight.w400, color: text);
+  TextStyle get body => TextStyle(fontSize: 14, height: 20 / 14, fontWeight: FontWeight.w400, color: text);
   TextStyle get bodyM => body.copyWith(fontWeight: FontWeight.w500);
-  TextStyle get small => TextStyle(fontSize: 12 + _up, height: 16 / 12, fontWeight: FontWeight.w400, color: text2);
-  TextStyle get cap => TextStyle(fontSize: 11 + _up, height: 14 / 11, fontWeight: FontWeight.w500, color: text3);
-  TextStyle get label =>
-      TextStyle(fontSize: 10.5, height: 14 / 10.5, fontWeight: FontWeight.w600, letterSpacing: 0.7, color: text3);
-  TextStyle get title => TextStyle(fontSize: 15, height: 20 / 15, fontWeight: FontWeight.w600, color: text);
-  TextStyle get display =>
-      TextStyle(fontSize: 20, height: 26 / 20, fontWeight: FontWeight.w600, letterSpacing: -0.3, color: text);
+  TextStyle get small => TextStyle(fontSize: 13, height: 17 / 13, fontWeight: FontWeight.w400, color: text2);
+  TextStyle get cap => TextStyle(fontSize: 12, height: 16 / 12, fontWeight: FontWeight.w500, color: text3);
+  TextStyle get label => TextStyle(fontSize: 11, height: 14 / 11, fontWeight: FontWeight.w600, letterSpacing: 0.7, color: text3);
+  TextStyle get title => TextStyle(fontSize: 16, height: 22 / 16, fontWeight: FontWeight.w600, color: text);
+  TextStyle get display => TextStyle(fontSize: 22, height: 28 / 22, fontWeight: FontWeight.w600, letterSpacing: -0.3, color: text);
   TextStyle get num => body.copyWith(fontFeatures: _tab);
   TextStyle get numSmall => small.copyWith(fontFeatures: _tab);
 
   @override
   Tk copyWith() => this;
   @override
-  Tk lerp(Tk? other, double t) => t < 0.5 ? this : (other ?? this);
+  Tk lerp(Tk? other, double t) => this;
 }
 
-ThemeData buildTheme(bool dark, {bool touch = false}) {
-  final t = (dark ? Tk.night : Tk.day).withTouch(touch);
-  final scheme = ColorScheme.fromSeed(seedColor: t.accent, brightness: dark ? Brightness.dark : Brightness.light).copyWith(
+/// The one theme. Its density is pinned, so macOS gets the same finger-sized controls as a tablet.
+ThemeData buildTheme() {
+  const t = Tk.night;
+  final scheme = ColorScheme.fromSeed(seedColor: t.accent, brightness: Brightness.dark).copyWith(
     primary: t.accent,
     onPrimary: t.onAccent,
     surface: t.bg1,
@@ -136,23 +110,25 @@ ThemeData buildTheme(bool dark, {bool touch = false}) {
     error: t.err,
   );
   return ThemeData(
-    brightness: scheme.brightness,
+    brightness: Brightness.dark,
     colorScheme: scheme,
     fontFamily: 'Inter',
+    visualDensity: VisualDensity.standard,
+    materialTapTargetSize: MaterialTapTargetSize.padded,
     scaffoldBackgroundColor: t.bg0,
     canvasColor: t.bg1,
     splashFactory: NoSplash.splashFactory,
     highlightColor: Colors.transparent,
     hoverColor: t.bg2,
     dividerColor: t.line,
-    extensions: [t],
+    extensions: const [t],
     textTheme: Typography.englishLike2021.apply(fontFamily: 'Inter', bodyColor: t.text, displayColor: t.text),
     textSelectionTheme: TextSelectionThemeData(cursorColor: t.accent, selectionColor: t.accent.withValues(alpha: 0.3)),
     tooltipTheme: TooltipThemeData(
       waitDuration: const Duration(milliseconds: 500),
-      decoration: BoxDecoration(color: t.dark ? t.bg3 : t.text, borderRadius: BorderRadius.circular(5)),
-      textStyle: TextStyle(fontSize: 11.5, color: t.dark ? t.text : t.bg1, fontFamily: 'Inter'),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(color: t.bg3, borderRadius: BorderRadius.circular(6)),
+      textStyle: TextStyle(fontSize: 13, color: t.text, fontFamily: 'Inter'),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
     ),
     popupMenuTheme: PopupMenuThemeData(
       color: t.bg2,
@@ -172,12 +148,12 @@ ThemeData buildTheme(bool dark, {bool touch = false}) {
 // ---------------------------------------------------------------------------------------------
 // Primitives
 
-/// Calls [builder] with whether the pointer is over it; taps go to [onTap].
+/// A tap target. [builder] gets whether a mouse pointer is over it, which may only change a shade:
+/// nothing may appear on hover alone, because a finger never hovers.
 class Hover extends StatefulWidget {
-  const Hover({super.key, required this.builder, this.onTap, this.onDoubleTap, this.tooltip});
+  const Hover({super.key, required this.builder, this.onTap, this.tooltip});
   final Widget Function(BuildContext context, bool hovered) builder;
   final VoidCallback? onTap;
-  final VoidCallback? onDoubleTap;
   final String? tooltip;
   @override
   State<Hover> createState() => _HoverState();
@@ -194,7 +170,6 @@ class _HoverState extends State<Hover> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
-        onDoubleTap: widget.onDoubleTap,
         child: widget.builder(context, over && widget.onTap != null),
       ),
     );
@@ -203,10 +178,11 @@ class _HoverState extends State<Hover> {
   }
 }
 
-/// On a touch screen, gives [child] a 48 dp hit area without drawing it any bigger.
-Widget hit(Tk t, Widget child) => t.touch
-    ? ConstrainedBox(constraints: const BoxConstraints(minWidth: 48, minHeight: 48), child: Center(widthFactor: 1, heightFactor: 1, child: child))
-    : child;
+/// Gives [child] a hit area of at least 48 x 48 dp without drawing it any bigger.
+Widget hitBox(Widget child) => ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+      child: Center(widthFactor: 1, heightFactor: 1, child: child),
+    );
 
 /// A 1 px line.
 class Hr extends StatelessWidget {
@@ -232,29 +208,6 @@ class Label extends StatelessWidget {
       Text(text.toUpperCase(), maxLines: 1, overflow: TextOverflow.ellipsis, style: Tk.of(context).label.copyWith(color: color));
 }
 
-/// A key cap: ⌘R, Space, Tab.
-class Kbd extends StatelessWidget {
-  const Kbd(this.keys, {super.key, this.onAccent = false});
-  final String keys;
-  final bool onAccent;
-  @override
-  Widget build(BuildContext context) {
-    final t = Tk.of(context);
-    if (t.touch) return const SizedBox.shrink();
-    final c = onAccent ? t.onAccent.withValues(alpha: 0.7) : t.text3;
-    return Container(
-      height: 16,
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: onAccent ? t.onAccent.withValues(alpha: 0.3) : t.lineStrong),
-      ),
-      child: Text(keys, style: TextStyle(fontSize: 10, height: 1.2, fontWeight: FontWeight.w500, color: c)),
-    );
-  }
-}
-
 /// A small tag. [accent] tints it.
 class Tag extends StatelessWidget {
   const Tag(this.text, {super.key, this.accent = false, this.color});
@@ -266,15 +219,15 @@ class Tag extends StatelessWidget {
     final t = Tk.of(context);
     final c = color ?? (accent ? t.accent : t.text2);
     return Container(
-      height: t.touch ? 20 : 18,
-      padding: const EdgeInsets.symmetric(horizontal: 6),
+      height: 22,
+      padding: const EdgeInsets.symmetric(horizontal: 7),
       decoration: BoxDecoration(
         color: accent || color != null ? c.withValues(alpha: 0.14) : t.bg2,
         borderRadius: BorderRadius.circular(4),
       ),
       child: Center(
         widthFactor: 1,
-        child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: t.touch ? 12 : 11, height: 1.2, fontWeight: FontWeight.w500, color: c)),
+        child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, height: 1.2, fontWeight: FontWeight.w500, color: c)),
       ),
     );
   }
@@ -283,19 +236,16 @@ class Tag extends StatelessWidget {
 enum BtnKind { primary, secondary, ghost }
 
 class Btn extends StatelessWidget {
-  const Btn(this.text, {super.key, this.icon, this.kind = BtnKind.secondary, this.onTap, this.kbd, this.tooltip, this.height});
+  const Btn(this.text, {super.key, this.icon, this.kind = BtnKind.secondary, this.onTap, this.tooltip});
   final String text;
   final IconData? icon;
   final BtnKind kind;
   final VoidCallback? onTap;
-  final String? kbd;
   final String? tooltip;
-  final double? height;
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
     final primary = kind == BtnKind.primary;
-    final kbd = t.touch ? null : this.kbd;
     return Opacity(
       opacity: onTap == null ? 0.4 : 1,
       child: Hover(
@@ -303,23 +253,22 @@ class Btn extends StatelessWidget {
         tooltip: tooltip,
         builder: (_, h) {
           final bg = switch (kind) {
-            BtnKind.primary => h ? Color.lerp(t.accent, t.dark ? Colors.white : Colors.black, 0.12)! : t.accent,
+            BtnKind.primary => h ? Color.lerp(t.accent, Colors.white, 0.12)! : t.accent,
             BtnKind.secondary => h ? t.bg3 : t.bg2,
             BtnKind.ghost => h ? t.bg2 : Colors.transparent,
           };
           final fg = primary ? t.onAccent : (kind == BtnKind.ghost && !h ? t.text2 : t.text);
-          return hit(t, Container(
-            height: t.touch ? t.ctl : (height ?? t.ctl),
-            padding: EdgeInsets.only(left: (icon != null ? 8 : 10) + (t.touch ? 4 : 0), right: (kbd != null ? 6 : 10) + (t.touch ? 4 : 0)),
+          return hitBox(Container(
+            height: t.ctl,
+            padding: EdgeInsets.only(left: icon != null ? 12 : 16, right: 16),
             decoration: BoxDecoration(
               color: bg,
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(8),
               border: kind == BtnKind.secondary ? Border.all(color: t.lineStrong.withValues(alpha: 0.7)) : null,
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
-              if (icon != null) ...[Icon(icon, size: t.touch ? 18 : 15, color: fg), const SizedBox(width: 6)],
-              Text(text, maxLines: 1, style: t.bodyM.copyWith(color: fg, fontSize: t.touch ? 14 : 12.5)),
-              if (kbd != null) ...[const SizedBox(width: 8), Kbd(kbd, onAccent: primary)],
+              if (icon != null) ...[Icon(icon, size: 20, color: fg), const SizedBox(width: 8)],
+              Text(text, maxLines: 1, style: t.bodyM.copyWith(color: fg, fontWeight: primary ? FontWeight.w600 : FontWeight.w500)),
             ]),
           ));
         },
@@ -328,13 +277,13 @@ class Btn extends StatelessWidget {
   }
 }
 
+/// An icon button: drawn 44 dp, hit at 48. [filled] gives it the secondary button's surface.
 class IconBtn extends StatelessWidget {
-  const IconBtn(this.icon, {super.key, this.onTap, this.tooltip, this.active = false, this.size = 28, this.color, this.filled = false});
+  const IconBtn(this.icon, {super.key, this.onTap, this.tooltip, this.active = false, this.color, this.filled = false});
   final IconData icon;
   final VoidCallback? onTap;
   final String? tooltip;
   final bool active;
-  final double size;
   final Color? color;
   final bool filled;
   @override
@@ -345,33 +294,31 @@ class IconBtn extends StatelessWidget {
       child: Hover(
         onTap: onTap,
         tooltip: tooltip,
-        builder: (_, h) => hit(t, Container(
-          width: t.touch ? 40 : size,
-          height: t.touch ? 40 : size,
+        builder: (_, h) => hitBox(Container(
+          width: t.ctl,
+          height: t.ctl,
           decoration: BoxDecoration(
             color: filled ? (h ? t.bg3 : t.bg2) : (h ? t.bg3 : Colors.transparent),
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(8),
             border: filled ? Border.all(color: t.lineStrong.withValues(alpha: 0.7)) : null,
           ),
-          child: Icon(icon, size: t.touch ? 20 : size * 0.57, color: color ?? (active ? t.accent : (h ? t.text : t.text2))),
+          child: Icon(icon, size: 22, color: color ?? (active ? t.accent : (h ? t.text : t.text2))),
         )),
       ),
     );
   }
 }
 
-/// A segmented control.
+/// A segmented control, 52 dp high so each segment is a 48 dp target.
 class Seg<T> extends StatelessWidget {
-  const Seg({super.key, required this.items, required this.value, required this.onChanged, this.expand = false, this.height});
+  const Seg({super.key, required this.items, required this.value, required this.onChanged, this.expand = false});
   final Map<T, String> items;
   final T value;
   final void Function(T) onChanged;
   final bool expand;
-  final double? height;
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
-    final height = t.touch ? 48.0 : (this.height ?? 28.0);
     final cells = [
       for (final e in items.entries)
         Hover(
@@ -379,87 +326,61 @@ class Seg<T> extends StatelessWidget {
           builder: (_, h) {
             final on = e.key == value;
             return Container(
-              height: height - 6,
-              constraints: BoxConstraints(minWidth: t.touch ? 48 : 0),
-              padding: EdgeInsets.symmetric(horizontal: t.touch ? 16 : 10),
-              alignment: expand ? Alignment.center : null,
+              constraints: const BoxConstraints(minWidth: 72),
+              padding: const EdgeInsets.symmetric(horizontal: 18),
               decoration: BoxDecoration(
-                color: on ? (t.dark ? t.bg3 : t.bg1) : Colors.transparent,
-                borderRadius: BorderRadius.circular(5),
-                border: on ? Border.all(color: t.lineStrong.withValues(alpha: t.dark ? 0.6 : 1)) : Border.all(color: Colors.transparent),
+                color: on ? t.bg3 : Colors.transparent,
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(color: on ? t.lineStrong.withValues(alpha: 0.6) : Colors.transparent),
               ),
               child: Center(
                 widthFactor: 1,
-                child: Text(e.value,
-                  maxLines: 1,
-                  style: t.bodyM.copyWith(fontSize: t.touch ? 14 : 12.5, color: on ? t.text : (h ? t.text : t.text2))),
+                child: Text(e.value, maxLines: 1, style: t.bodyM.copyWith(color: on || h ? t.text : t.text2)),
               ),
             );
           },
         ),
     ];
     return Container(
-      height: height,
+      height: 52,
       padding: const EdgeInsets.all(2),
-      decoration: BoxDecoration(
-        color: t.dark ? t.bg0 : t.bg2,
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: t.line),
-      ),
+      decoration: BoxDecoration(color: t.bg0, borderRadius: BorderRadius.circular(9), border: Border.all(color: t.line)),
       child: Row(
         mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [for (final c in cells) expand ? Expanded(child: c) : c],
       ),
     );
   }
 }
 
-/// A search field. [kbd] is the hint shown while it is empty.
+/// A search field.
 class SearchField extends StatelessWidget {
-  const SearchField({super.key, this.controller, this.focusNode, required this.hint, this.onChanged, this.kbd, this.autofocus = false, this.height, this.bare = false, this.onSubmitted});
+  const SearchField({super.key, this.controller, this.focusNode, required this.hint, this.onChanged});
   final TextEditingController? controller;
   final FocusNode? focusNode;
   final String hint;
   final void Function(String)? onChanged;
-  final void Function(String)? onSubmitted;
-  final String? kbd;
-  final bool autofocus;
-  final double? height;
-  final bool bare;
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
-    final big = (this.height ?? 0) > 36;
-    final height = this.height ?? (t.touch ? 48.0 : 32.0);
     return Container(
-      height: height,
-      padding: EdgeInsets.symmetric(horizontal: big ? 14 : 8),
-      decoration: bare
-          ? null
-          : BoxDecoration(
-              color: t.dark ? t.bg0 : t.bg2,
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: t.line),
-            ),
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(color: t.bg0, borderRadius: BorderRadius.circular(8), border: Border.all(color: t.line)),
       child: Row(children: [
-        Icon(Icons.search, size: big ? 18 : 15, color: t.text3),
-        SizedBox(width: big ? 10 : 6),
+        Icon(Icons.search, size: 20, color: t.text3),
+        const SizedBox(width: 8),
         Expanded(
           child: TextField(
             controller: controller,
             focusNode: focusNode,
-            autofocus: autofocus,
             onChanged: onChanged,
-            onSubmitted: onSubmitted,
-            style: big ? t.title.copyWith(fontWeight: FontWeight.w400) : t.body,
+            style: t.body,
             cursorWidth: 1.2,
-            decoration: InputDecoration.collapsed(
-              hintText: hint,
-              hintStyle: (big ? t.title.copyWith(fontWeight: FontWeight.w400) : t.body).copyWith(color: t.text3),
-            ),
+            decoration: InputDecoration.collapsed(hintText: hint, hintStyle: t.body.copyWith(color: t.text3)),
           ),
         ),
-        if (kbd != null) Kbd(kbd!),
       ]),
     );
   }
@@ -484,29 +405,29 @@ class Menu<T> extends StatelessWidget {
         for (final e in items.entries)
           PopupMenuItem<T>(
             value: e.key,
-            height: t.touch ? 48 : 30,
+            height: 48,
             child: Row(children: [
-              SizedBox(width: 20, child: e.key == value ? Icon(Icons.check, size: 14, color: t.accent) : null),
+              SizedBox(width: 28, child: e.key == value ? Icon(Icons.check, size: 18, color: t.accent) : null),
               Text(e.value, style: t.body),
             ]),
           ),
       ],
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
-        child: hit(t, Container(
-          height: t.ctl,
-          padding: EdgeInsets.only(left: t.touch ? 14 : 10, right: t.touch ? 10 : 6),
+        child: hitBox(Container(
+          height: 48,
+          padding: const EdgeInsets.only(left: 14, right: 10),
           decoration: BoxDecoration(
             color: t.bg2,
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(color: t.lineStrong.withValues(alpha: 0.7)),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (icon != null) ...[Icon(icon, size: 14, color: t.text2), const SizedBox(width: 6)],
-            if (label != null) ...[Text(label!, style: t.small.copyWith(color: t.text3)), const SizedBox(width: 6)],
-            Text(items[value] ?? '$value', maxLines: 1, style: t.bodyM.copyWith(fontSize: t.touch ? 14 : 12.5)),
-            const SizedBox(width: 2),
-            Icon(Icons.unfold_more, size: 14, color: t.text3),
+            if (icon != null) ...[Icon(icon, size: 18, color: t.text2), const SizedBox(width: 8)],
+            if (label != null) ...[Text(label!, style: t.small.copyWith(color: t.text3)), const SizedBox(width: 8)],
+            Text(items[value] ?? '$value', maxLines: 1, style: t.bodyM),
+            const SizedBox(width: 4),
+            Icon(Icons.unfold_more, size: 18, color: t.text3),
           ]),
         )),
       ),
@@ -536,28 +457,24 @@ class _SeedFieldState extends State<SeedField> {
     final s = '${widget.model.seed}';
     if (c.text != s && int.tryParse(c.text) != widget.model.seed) c.text = s;
     return Container(
-      height: t.touch ? 48 : 28,
-      padding: EdgeInsets.only(left: t.touch ? 14 : 10),
-      decoration: BoxDecoration(
-        color: t.dark ? t.bg0 : t.bg2,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: t.line),
-      ),
+      height: 48,
+      padding: const EdgeInsets.only(left: 14),
+      decoration: BoxDecoration(color: t.bg0, borderRadius: BorderRadius.circular(8), border: Border.all(color: t.line)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Text('Seed', style: t.small.copyWith(color: t.text3)),
-        const SizedBox(width: 6),
+        const SizedBox(width: 8),
         SizedBox(
-          width: t.touch ? 52 : 44,
+          width: 52,
           child: TextField(
             controller: c,
-            style: t.num.copyWith(fontWeight: FontWeight.w500, fontSize: t.touch ? 14 : 12.5),
+            style: t.num.copyWith(fontWeight: FontWeight.w500),
             cursorWidth: 1.2,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(5)],
             decoration: const InputDecoration.collapsed(hintText: ''),
             onChanged: (v) => widget.model.setSeed(int.tryParse(v) ?? 0),
           ),
         ),
-        IconBtn(Icons.casino_outlined, tooltip: 'New seed  (N)', size: 26, onTap: widget.model.rollSeed),
+        IconBtn(Icons.casino_outlined, tooltip: 'New seed  (N)', onTap: widget.model.rollSeed),
       ]),
     );
   }
@@ -669,7 +586,7 @@ class WeightBar extends StatelessWidget {
       ],
       SizedBox(
         width: 36,
-        child: Text('${(100 * weight / total).round()}%', textAlign: TextAlign.right, softWrap: false, style: t.numSmall.copyWith(fontSize: 11.5, color: on ? t.text : t.text3)),
+        child: Text('${(100 * weight / total).round()}%', textAlign: TextAlign.right, softWrap: false, style: t.numSmall.copyWith(color: on ? t.text : t.text3)),
       ),
     ]);
   }
@@ -691,17 +608,13 @@ class _BarPainter extends CustomPainter {
   bool shouldRepaint(_BarPainter o) => o.v != v || o.fg != fg || o.bg != bg;
 }
 
-/// One preset in a list. Click picks it; the play button, shown on hover, auditions it.
+/// One preset in a list. A tap on the row picks it; its play button auditions it without picking.
 class PresetRow extends StatelessWidget {
-  const PresetRow({super.key, required this.path, required this.model, this.current = false, this.cursor = false, this.onTap, this.trailing, this.height, this.padding = 12});
+  const PresetRow({super.key, required this.path, required this.model, this.current = false, this.onTap});
   final String path;
   final Model model;
   final bool current; // the sound the target has now
-  final bool cursor; // keyboard highlight
   final VoidCallback? onTap;
-  final Widget? trailing;
-  final double? height;
-  final double padding;
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
@@ -709,27 +622,18 @@ class PresetRow extends StatelessWidget {
     return Hover(
       onTap: onTap,
       builder: (_, h) => Container(
-        height: height ?? t.listRow,
+        height: t.row,
         margin: const EdgeInsets.symmetric(horizontal: 6),
-        padding: EdgeInsets.only(left: padding - 6, right: 4),
-        decoration: BoxDecoration(
-          color: current ? t.accentSoft : (h || cursor ? t.bg2 : Colors.transparent),
-          borderRadius: BorderRadius.circular(5),
-        ),
+        padding: const EdgeInsets.only(left: 10),
+        decoration: BoxDecoration(color: current ? t.accentSoft : (h ? t.bg2 : Colors.transparent), borderRadius: BorderRadius.circular(6)),
         child: Row(children: [
           Expanded(child: SoundName(path, style: current ? t.bodyM : t.body)),
-          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
-          const SizedBox(width: 4),
-          if (t.touch && current) Icon(Icons.check, size: 16, color: t.accent),
+          if (current) Icon(Icons.check, size: 18, color: t.accent),
           SizedBox(
-            width: t.touch ? 48 : 22,
+            width: 48,
             child: playing
-                ? Icon(Icons.volume_up_rounded, size: t.touch ? 18 : 14, color: t.accent)
-                : (h || cursor || t.touch)
-                    ? IconBtn(Icons.play_arrow_rounded, size: 22, tooltip: 'Audition', onTap: () => model.audition(path))
-                    : current
-                        ? Icon(Icons.check, size: 13, color: t.accent)
-                        : null,
+                ? Icon(Icons.volume_up_rounded, size: 20, color: t.accent)
+                : IconBtn(Icons.play_arrow_rounded, tooltip: 'Audition', onTap: () => model.audition(path)),
           ),
         ]),
       ),
@@ -851,27 +755,26 @@ class Meter extends StatelessWidget {
   }
 }
 
-/// A small piano. A click plays the selected sound at that note.
+/// A small piano. A tap plays the selected sound at that note. It shows as many octaves as fit
+/// with white keys at least 48 dp wide.
 class MiniKeys extends StatelessWidget {
-  const MiniKeys({super.key, required this.onNote, this.octaves = 2, this.height = 56, this.lit});
+  const MiniKeys({super.key, required this.onNote, this.height = 96, this.lit});
   final void Function(int note) onNote;
-  final int octaves;
   final double height;
   final int? lit;
   static const _black = {1: 0, 3: 1, 6: 3, 8: 4, 10: 5}; // semitone -> the white key it follows
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
-    final whiteC = t.dark ? const Color(0xFFD6D8DD) : Colors.white;
-    final blackC = t.dark ? const Color(0xFF0D0E10) : const Color(0xFF23262B);
+    const whiteC = Color(0xFFD6D8DD);
+    const blackC = Color(0xFF0D0E10);
     const whites = [0, 2, 4, 5, 7, 9, 11];
     return LayoutBuilder(builder: (context, box) {
-      final octaves = t.touch ? (box.maxWidth / (7 * 48)).floor().clamp(1, 4) : this.octaves;
+      final octaves = (box.maxWidth / (7 * 48)).floor().clamp(1, 4);
       final count = octaves * 7 + 1;
       final w = box.maxWidth / count;
-      return Container(
+      return SizedBox(
         height: height,
-        decoration: t.dark ? null : BoxDecoration(color: t.lineStrong, border: Border.all(color: t.lineStrong), borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4))),
         child: Stack(children: [
           Row(children: [
             for (var i = 0; i < count; i++)
@@ -883,13 +786,13 @@ class MiniKeys extends StatelessWidget {
                     return Container(
                       margin: EdgeInsets.only(right: i == count - 1 ? 0 : 1),
                       alignment: Alignment.bottomCenter,
-                      padding: const EdgeInsets.only(bottom: 3),
+                      padding: const EdgeInsets.only(bottom: 4),
                       decoration: BoxDecoration(
                         color: lit == note ? t.accent : (h ? Color.lerp(whiteC, t.accent, 0.35) : whiteC),
-                        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(3)),
+                        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(4)),
                       ),
                       child: i % 7 == 0
-                          ? Text('C${3 + i ~/ 7}', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.w500, color: Colors.black.withValues(alpha: 0.45)))
+                          ? Text('C${3 + i ~/ 7}', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: Colors.black.withValues(alpha: 0.45)))
                           : null,
                     );
                   },
@@ -908,7 +811,7 @@ class MiniKeys extends StatelessWidget {
                   builder: (_, h) => Container(
                     decoration: BoxDecoration(
                       color: h ? Color.lerp(blackC, t.accent, 0.5) : blackC,
-                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(2)),
+                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(3)),
                     ),
                   ),
                 ),
@@ -931,22 +834,22 @@ class CardPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Tk.of(context);
     return Hover(
-      tooltip: 'Card folder: 171 synths, 43 kits. Click to choose another',
+      tooltip: 'Card folder: 171 synths, 43 kits. Tap to choose another',
       onTap: () => model.setCardFolder(model.cardFolder.endsWith('card') ? '~/Deluge/Backup 2026' : '~/Music/Deluge card'),
-      builder: (_, h) => hit(t, Container(
+      builder: (_, h) => hitBox(Container(
         height: t.ctl,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        decoration: BoxDecoration(color: h ? t.bg2 : Colors.transparent, borderRadius: BorderRadius.circular(6)),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(color: h ? t.bg2 : Colors.transparent, borderRadius: BorderRadius.circular(8)),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.sd_card_outlined, size: t.touch ? 18 : 14, color: t.text3),
-          if (!compact) ...[const SizedBox(width: 6), Text(model.cardFolder, maxLines: 1, style: t.small)],
+          Icon(Icons.sd_card_outlined, size: 20, color: t.text3),
+          if (!compact) ...[const SizedBox(width: 8), Text(model.cardFolder, maxLines: 1, style: t.small)],
         ]),
       )),
     );
   }
 }
 
-/// Engine state and voice count. Click it to see the restart (the prototype's freeze simulator).
+/// Engine state and voice count. Tap it to see the restart (the prototype's freeze simulator).
 class EnginePill extends StatelessWidget {
   const EnginePill({super.key, required this.model});
   final Model model;
@@ -956,26 +859,26 @@ class EnginePill extends StatelessWidget {
     final running = model.engine == EngineState.running;
     final c = running ? t.ok : t.warn;
     return Hover(
-      tooltip: running ? 'Engine running. Click to simulate a freeze (prototype)' : 'The Engine froze and is restarting',
+      tooltip: running ? 'Engine running. Tap to simulate a freeze (prototype)' : 'The Engine froze and is restarting',
       onTap: running ? model.simulateFreeze : null,
-      builder: (_, h) => hit(t, Container(
+      builder: (_, h) => hitBox(Container(
         height: t.ctl,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
           color: running ? (h ? t.bg2 : Colors.transparent) : t.warn.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(8),
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 7, height: 7, decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
-          const SizedBox(width: 7),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
+          const SizedBox(width: 8),
           Text(running ? 'Engine' : 'Engine restarting…', style: t.small.copyWith(color: running ? t.text2 : t.warn)),
           if (running) ...[
-            const SizedBox(width: 8),
-            Meter(value: model.totalVoices, max: 16, segments: 8, height: 9),
+            const SizedBox(width: 10),
+            Meter(value: model.totalVoices, max: 16, segments: 8, height: 10),
             const SizedBox(width: 4),
             SizedBox(
-              width: t.touch ? 60 : 52,
-              child: Text('${model.totalVoices} voices', textAlign: TextAlign.right, softWrap: false, style: t.numSmall.copyWith(color: t.text3, fontSize: t.touch ? 12.5 : 11.5)),
+              width: 62,
+              child: Text('${model.totalVoices} voices', textAlign: TextAlign.right, softWrap: false, style: t.numSmall.copyWith(color: t.text3)),
             ),
           ],
         ]),
@@ -984,8 +887,8 @@ class EnginePill extends StatelessWidget {
   }
 }
 
-/// The top bar every variant uses: the app's name, [left] (usually the mode switch), then the
-/// Card folder and the Engine on the right. The middle stays free for the prototype switcher.
+/// The top bar: the app's name, [left] (the Piece/Setup switch), then the Card folder, the Engine
+/// and [right] on the right.
 class TopBar extends StatelessWidget {
   const TopBar({super.key, required this.model, this.left = const [], this.right = const []});
   final Model model;
@@ -998,23 +901,23 @@ class TopBar extends StatelessWidget {
     return Container(
       height: t.top,
       decoration: BoxDecoration(color: t.bg1, border: Border(bottom: BorderSide(color: t.line))),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.only(left: 16, right: 8),
       child: Row(children: [
         Container(
-          width: 18,
-          height: 18,
-          decoration: BoxDecoration(color: t.accent, borderRadius: BorderRadius.circular(5)),
-          child: Icon(Icons.graphic_eq_rounded, size: 13, color: t.onAccent),
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(color: t.accent, borderRadius: BorderRadius.circular(6)),
+          child: Icon(Icons.graphic_eq_rounded, size: 17, color: t.onAccent),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 10),
         if (!narrow) Text('Deluge Engine', style: t.bodyM.copyWith(fontWeight: FontWeight.w600)),
         const SizedBox(width: 16),
         ...left,
         const Spacer(),
-        ...right,
         CardPill(model: model, compact: narrow),
         const SizedBox(width: 4),
         EnginePill(model: model),
+        ...right,
       ]),
     );
   }
@@ -1022,27 +925,27 @@ class TopBar extends StatelessWidget {
 
 /// The Piece/Setup switch.
 class ModeSeg extends StatelessWidget {
-  const ModeSeg({super.key, required this.model, this.pieceName = 'Piece'});
+  const ModeSeg({super.key, required this.model});
   final Model model;
-  final String pieceName;
   @override
-  Widget build(BuildContext context) =>
-      Seg<Mode>(items: {Mode.piece: pieceName, Mode.setup: 'Setup'}, value: model.mode, onChanged: model.setMode);
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Seg<Mode>(items: const {Mode.piece: 'Piece', Mode.setup: 'Setup'}, value: model.mode, onChanged: model.setMode),
+      );
 }
 
 /// The bottom line: what just happened on the left, the last error on the right.
 class StatusBar extends StatelessWidget {
-  const StatusBar({super.key, required this.model, this.hints = const []});
+  const StatusBar({super.key, required this.model});
   final Model model;
-  final List<(String, String)> hints; // (key, what it does)
   @override
   Widget build(BuildContext context) {
     final t = Tk.of(context);
     final restarting = model.engine == EngineState.restarting;
     return Container(
-      height: t.touch ? 28 : 26,
+      height: 28,
       decoration: BoxDecoration(color: t.bg1, border: Border(top: BorderSide(color: t.line))),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(children: [
         if (restarting) ...[
           SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5, color: t.warn)),
@@ -1052,17 +955,9 @@ class StatusBar extends StatelessWidget {
           child: Text(model.status, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.cap.copyWith(color: restarting ? t.warn : t.text2)),
         ),
         if (model.lastError != null) ...[
-          Icon(Icons.error_outline, size: 12, color: t.err),
+          Icon(Icons.error_outline, size: 14, color: t.err),
           const SizedBox(width: 4),
           Text('Last error: ${model.lastError}', style: t.cap.copyWith(color: t.err)),
-          const SizedBox(width: 16),
-        ],
-        if (!t.touch)
-          for (final (k, what) in hints) ...[
-          Kbd(k),
-          const SizedBox(width: 5),
-          Text(what, style: t.cap),
-          const SizedBox(width: 14),
         ],
       ]),
     );
@@ -1098,7 +993,7 @@ class _RulerPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: name.toUpperCase(),
-          style: TextStyle(fontFamily: 'Inter', fontSize: 9.5, fontWeight: FontWeight.w600, letterSpacing: 0.6, color: t.text3),
+          style: TextStyle(fontFamily: 'Inter', fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.6, color: t.text3),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
@@ -1107,7 +1002,7 @@ class _RulerPainter extends CustomPainter {
         final tp2 = TextPainter(
           text: TextSpan(
             text: '${start + 1}',
-            style: TextStyle(fontFamily: 'Inter', fontSize: 9.5, fontWeight: FontWeight.w500, color: t.text3.withValues(alpha: 0.6), fontFeatures: const [FontFeature.tabularFigures()]),
+            style: TextStyle(fontFamily: 'Inter', fontSize: 11, fontWeight: FontWeight.w500, color: t.text3.withValues(alpha: 0.6), fontFeatures: const [FontFeature.tabularFigures()]),
           ),
           textDirection: TextDirection.ltr,
         )..layout();
@@ -1163,7 +1058,7 @@ class RestartVeil extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Piece controls the variants share
+// Piece controls both tabs share
 
 class GenreMenu extends StatelessWidget {
   const GenreMenu({super.key, required this.model});
@@ -1194,7 +1089,6 @@ class RenderBtn extends StatelessWidget {
         model.rendering ? 'Rendering…' : (text ?? 'Render ${model.lengthSeconds} s'),
         icon: Icons.graphic_eq_rounded,
         kind: BtnKind.primary,
-        kbd: '⌘R',
         tooltip: 'Render the Piece to a WAV, about 2 s for 60 s of audio',
         onTap: model.rendering || model.engine != EngineState.running ? null : model.render,
       );
@@ -1208,27 +1102,11 @@ class LiveBtn extends StatelessWidget {
   Widget build(BuildContext context) => Btn(
         model.live ? 'Stop live' : 'Play live',
         icon: model.live ? Icons.stop_rounded : Icons.sensors_rounded,
-        kbd: 'L',
         tooltip: 'The Generator plays the Piece live, so a new Sound pick is heard at once',
         onTap: model.engine == EngineState.running ? model.toggleLive : null,
       );
 }
 
-/// A dot and a few words when the picks have changed since the newest render.
-class DirtyNote extends StatelessWidget {
-  const DirtyNote({super.key, required this.model});
-  final Model model;
-  @override
-  Widget build(BuildContext context) {
-    final t = Tk.of(context);
-    if (!model.dirty) return const SizedBox.shrink();
-    return Row(mainAxisSize: MainAxisSize.min, children: [
-      Container(width: 6, height: 6, decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle)),
-      const SizedBox(width: 6),
-      Flexible(child: Text('Changed since the last render', maxLines: 1, overflow: TextOverflow.ellipsis, style: t.small.copyWith(color: t.text2))),
-    ]);
-  }
-}
 
 /// The MIDI input the Setup listens to.
 class MidiPill extends StatelessWidget {

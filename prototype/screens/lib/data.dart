@@ -134,11 +134,12 @@ final _fxLanes = <Slot>[
 ];
 
 /// Genres and their parts. Detroit's palettes are stand-ins borrowed from the other genres.
+/// The Synth Parts come first: they are the sounds you change most, so they stay above the fold.
 final genres = <String, List<Slot>>{
-  'Acid techno': [..._drumLanes, Slot('ACID', null, _acid), Slot('DRONE', null, _drone), ..._fxLanes],
-  'Melodic techno': [..._drumLanes, Slot('BASS', null, _rolling), Slot('PAD', null, _melPad), Slot('ARP', null, _arp), ..._fxLanes],
-  'Dub techno': [..._drumLanes, Slot('SUB', null, _sub), Slot('STAB', null, _dubStab), Slot('PAD', null, _dubPad), ..._fxLanes],
-  'Detroit techno': [..._drumLanes, Slot('BASS', null, _bass), Slot('STRINGS', null, _dubPad), Slot('STAB', null, _stab), Slot('MOTIF', null, _arp), ..._fxLanes],
+  'Acid techno': [Slot('ACID', null, _acid), Slot('DRONE', null, _drone), ..._drumLanes, ..._fxLanes],
+  'Melodic techno': [Slot('BASS', null, _rolling), Slot('PAD', null, _melPad), Slot('ARP', null, _arp), ..._drumLanes, ..._fxLanes],
+  'Dub techno': [Slot('SUB', null, _sub), Slot('STAB', null, _dubStab), Slot('PAD', null, _dubPad), ..._drumLanes, ..._fxLanes],
+  'Detroit techno': [Slot('BASS', null, _bass), Slot('STRINGS', null, _dubPad), Slot('STAB', null, _stab), Slot('MOTIF', null, _arp), ..._drumLanes, ..._fxLanes],
 };
 
 class ChannelSlot {
@@ -160,6 +161,9 @@ class Render {
 }
 
 enum Mode { piece, setup }
+
+/// The two views of one Piece. They share the selected row, A/B, the playhead and the picker.
+enum PieceTab { compare, timeline }
 
 enum EngineState { running, restarting }
 
@@ -201,8 +205,9 @@ class Model extends ChangeNotifier {
   String ab = 'A'; // which render the transport plays
   double position = 0.31; // playhead, 0..1
   bool live = false; // the Generator playing live, not a render
-  bool pickerOpen = false; // variant E's command palette
-  bool autoRender = true; // variant D: render the candidate after each change
+  PieceTab tab = PieceTab.compare;
+  bool pickerOpen = true; // the sound picker beside (or under) the Piece; Setup always shows it
+  bool autoRender = true; // render the candidate after each change
   String midiIn = 'KeyStep 37';
 
   int get tempo => 126 + seed % 12;
@@ -228,6 +233,11 @@ class Model extends ChangeNotifier {
 
   void setMode(Mode m) {
     mode = m;
+    notifyListeners();
+  }
+
+  void setTab(PieceTab v) {
+    tab = v;
     notifyListeners();
   }
 
@@ -456,6 +466,8 @@ class Model extends ChangeNotifier {
         'lastError': lastError,
         'totalVoices': totalVoices,
         'mode': mode.name,
+        'tab': tab.name,
+        'pickerOpen': pickerOpen,
         'selectedChannel': selectedChannel,
         'selectedSlot': selectedSlot,
         'ab': ab,
