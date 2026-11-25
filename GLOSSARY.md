@@ -31,3 +31,15 @@ _Avoid_: Golden, ground truth, original
 **Parity**:
 The Engine's output being within the agreed tolerances of the Reference for a sound. It never means bit-exact.
 _Avoid_: Equivalence, accuracy, fidelity
+
+**Backend**:
+What the GUI talks to through its protocol: the Engine, or later a real Deluge.
+_Avoid_: Server, host, device
+
+**Render**:
+An audio file the Engine makes of a Piece or of notes played to a Setup, kept so it can be played and compared. Not the firmware's Capture, which is a recording made in delugemu.
+_Avoid_: Capture, take, bounce
+
+**Audition**:
+Playing a sound briefly, from the picker or the on-screen keyboard, before choosing it.
+_Avoid_: Preview, test, try
