@@ -1,6 +1,6 @@
 # deluge-engine
 
-The Deluge community firmware's sound engine, built for macOS. It plays Deluge Synth and Kit presets from MIDI, or renders them to WAV, using the firmware's own code.
+The Deluge community firmware's sound code, built for macOS, with a GUI app. It plays Deluge Synth and Kit presets from MIDI, alone or several at once, and renders Generative-mode Pieces so two sets of sounds can be compared. It uses the firmware's own code.
 
 Work in progress. See [docs/spec.md](docs/spec.md) for the plan and [docs/spike-findings.md](docs/spike-findings.md) for the spike that rendered the first presets.
 
