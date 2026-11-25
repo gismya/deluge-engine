@@ -1,0 +1,17 @@
+# UBSan exemptions for the sanitizer build (CMakeLists.txt, -fsanitize-ignorelist). One firmware file per entry,
+# exempt from one check only, each because the firmware relies on what both the Deluge's Cortex-A9 and arm64 do.
+# Add an entry only with its reason here and in docs/implementation-notes.md ("E1: the build").
+
+# freeverb.cpp:90 and on (Freeverb::update) convert INT32_MAX-scaled floats to int32: (float)INT32_MAX is 2^31, out
+# of range. ARMv7's vcvt and arm64's fcvtzs both saturate to INT32_MAX.
+[float-cast-overflow]
+src:*/src/deluge/dsp/reverb/freeverb/freeverb.cpp
+
+# ff.c:617 ld_word (and its siblings) load little-endian words through WORD*/DWORD* casts at any byte offset of a
+# sector buffer ("simplified by Rohan"). Both CPUs allow unaligned plain loads and stores.
+[alignment]
+src:*/src/fatfs/ff.c
+
+# auto_param.cpp:2097 (AutoParam::readFromFile) compares the first two characters of an XML value with "0x" through a
+# uint16_t* cast of the reader's buffer, at any byte offset. Both CPUs allow unaligned plain loads.
+src:*/src/deluge/modulation/automation/auto_param.cpp
