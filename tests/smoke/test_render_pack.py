@@ -35,15 +35,36 @@ def build_dir():
     return Path(os.environ.get("DELUGE_ENGINE_BUILD", ROOT / "build/release"))
 
 
-def make_card(path):
+def run_checked(cmd, timeout=120):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)} failed with exit {r.returncode}:\n{r.stdout}{r.stderr}")
+    return r.stdout
+
+
+def format_via_device(path):
+    """macOS 26's newfs_msdos won't format a plain file ("Cannot get partition offset"). Attached as a raw disk
+    image with no mount, the same file is a device it formats; detached again whatever happens."""
+    out = run_checked(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", str(path)])
+    device = out.split()[0]  # /dev/diskN
+    try:
+        run_checked(["newfs_msdos", "-F", "32", "-c", "64", "-v", "DELUGE", device.replace("/dev/disk", "/dev/rdisk")])
+    finally:
+        run_checked(["hdiutil", "detach", device])
+
+
+def make_card(path, via_device=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         f.truncate(CARD_MIB * 1024 * 1024)  # sparse: a few MB on disk
-    cmd = ["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255", "-u", "63",
-           "-o", "0", "-v", "DELUGE", str(path)]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        raise RuntimeError(f"{' '.join(cmd)} failed with exit {r.returncode}:\n{r.stdout}{r.stderr}")
+    try:
+        if via_device:
+            raise RuntimeError("asked for the device route")
+        # 32 KiB clusters (-c 64), the geometry given because a plain file has none.
+        run_checked(["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255",
+                     "-u", "63", "-o", "0", "-v", "DELUGE", str(path)])
+    except RuntimeError:
+        format_via_device(path)
     with fat_image.FatImage(str(path)) as card:
         card.write_file(PRESET, (FIRMWARE / "pack" / PRESET).read_bytes())
 
