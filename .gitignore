@@ -1,0 +1,4 @@
+# Build output, renders and anything made from factory card content. Never commit these.
+build/
+*.wav
+*.img
