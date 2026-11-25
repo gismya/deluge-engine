@@ -99,7 +99,7 @@ Include this in each implementer's prompt, with the ticket, its branch and its w
   A seam that changes the Release build (F5, and any other) waits for the user: label its ticket `ready-for-human` and add a line to the state file.
 - **Closing tickets:**
   - E and G: close the ticket if `Closes` didn't.
-  - F: nothing closes the ticket automatically. Comment "Done in <firmware PR URL>", then close it.
+  - F: nothing closes the ticket automatically. Comment "Done in <firmware PR URL>", then close it: right after the seam merges if E1 hasn't landed yet, otherwise when its pin PR merges.
 
   Closing unblocks what the ticket blocked.
 - **The submodule pin:**

@@ -145,7 +145,6 @@ None. Possible seams, none needed now:
   defines `snprintf` as a macro (`snprintf_`). Use plain `snprintf`.
 - No numpy on the system Python, so the checks are pure Python. All three sections run in about 10 s.
 
-
 ## Recommendation for the Setups ticket
 
 - Use route 1. A Setup is the current song plus one clip and instrument per binding. Binding means setting
