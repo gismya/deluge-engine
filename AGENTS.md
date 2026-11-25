@@ -14,7 +14,7 @@ deluge-engine builds the Deluge community firmware's sound code for macOS (Apple
 - **Timeouts.** Give every run of the engine or delugemu a timeout. Firmware freezes can hang forever.
 - Issues live in GitHub Issues on gismya/deluge-engine. Use the labels `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 - Running a milestone with subagents: read [docs/agents/orchestration.md](docs/agents/orchestration.md).
-- Background and traps: [docs/spike-findings.md](docs/spike-findings.md), from the spike on branch `spike/host-compile`, and `spike/perform-findings.md` on branch `task/perform-in-engine`. Add the traps you hit to `docs/implementation-notes.md`.
+- Background and traps: the spikes' findings, [docs/spike-findings.md](docs/spike-findings.md) (host build), [docs/perform-findings.md](docs/perform-findings.md) (Perform) and [docs/setup-findings.md](docs/setup-findings.md) (Setups). Add the traps you hit to `docs/implementation-notes.md`.
 - The GUI's reference design is `prototype/screens/` on branch `prototype/screens` (spec §8). That code is throwaway: never merge it.
 
 ## Checks
