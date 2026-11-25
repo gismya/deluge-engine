@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FIRMWARE = ROOT / "firmware"
+FIRMWARE = Path(os.environ.get("DELUGE_FIRMWARE_DIR", ROOT / "firmware"))  # tools/check.py --firmware-dir
 sys.path.insert(0, str(FIRMWARE / "scripts/generative"))
 import fat_image  # noqa: E402  (the firmware's FAT32 writer, stdlib only)
 
@@ -39,8 +39,11 @@ def make_card(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         f.truncate(CARD_MIB * 1024 * 1024)  # sparse: a few MB on disk
-    subprocess.run(["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255",
-                    "-u", "63", "-o", "0", "-v", "DELUGE", str(path)], check=True, capture_output=True, timeout=120)
+    cmd = ["newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", str(CARD_MIB * 2048), "-h", "255", "-u", "63",
+           "-o", "0", "-v", "DELUGE", str(path)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)} failed with exit {r.returncode}:\n{r.stdout}{r.stderr}")
     with fat_image.FatImage(str(path)) as card:
         card.write_file(PRESET, (FIRMWARE / "pack" / PRESET).read_bytes())
 

@@ -66,8 +66,12 @@ static InstrumentClip* linkIntoSong(Song* song, Instrument* instrument) {
 	return clip;
 }
 
-static void writeWav(const char* path, const std::vector<int32_t>& frames) {
+static bool writeWav(const char* path, const std::vector<int32_t>& frames) {
 	FILE* f = std::fopen(path, "wb");
+	if (f == nullptr) {
+		std::perror(path);
+		return false;
+	}
 	uint32_t dataBytes = frames.size() * 4;
 	auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
 	auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
@@ -83,8 +87,8 @@ static void writeWav(const char* path, const std::vector<int32_t>& frames) {
 	u16(32);
 	std::fwrite("data", 1, 4, f);
 	u32(dataBytes);
-	std::fwrite(frames.data(), 4, frames.size(), f);
-	std::fclose(f);
+	bool ok = std::fwrite(frames.data(), 4, frames.size(), f) == frames.size();
+	return std::fclose(f) == 0 && ok;
 }
 
 static int render(int argc, char** argv) {
@@ -187,13 +191,16 @@ static int render(int argc, char** argv) {
 		// The firmware's scheduler runs this as its own task: sample clusters are streamed from the card here.
 		audioFileManager.loadAnyEnqueuedClusters(128, false);
 	}
-	writeWav(argv[2], out);
-	int32_t peak = 0;
-	for (int32_t s : out) {
-		peak = std::max(peak, s < 0 ? -s : s);
+	if (!writeWav(argv[2], out)) {
+		std::fprintf(stderr, "couldn't write %s\n", argv[2]);
+		return 1;
 	}
-	std::fprintf(stderr, "wrote %s: %zu frames, peak %d (%.1f dBFS)\n", argv[2], out.size() / 2, peak,
-	             peak ? 20 * std::log10(peak / 2147483648.0) : -999.0);
+	int64_t peak = 0; // int64: -INT32_MIN doesn't fit an int32
+	for (int32_t s : out) {
+		peak = std::max<int64_t>(peak, s < 0 ? -(int64_t)s : s);
+	}
+	std::fprintf(stderr, "wrote %s: %zu frames, peak %lld (%.1f dBFS)\n", argv[2], out.size() / 2,
+	             (long long)peak, peak ? 20 * std::log10(peak / 2147483648.0) : -999.0);
 	return 0;
 }
 

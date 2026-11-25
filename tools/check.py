@@ -44,7 +44,7 @@ def factory_violations(repo):
     generated at test time (spec §2)."""
     out = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True, text=True)
     paths = [p for p in out.stdout.split("\0") if p]
-    return sorted(p for p in paths if p.startswith("build/") or p.lower().endswith(FACTORY_SUFFIXES))
+    return sorted(p for p in paths if p.lower().startswith("build/") or p.lower().endswith(FACTORY_SUFFIXES))
 
 
 def find_tool(name, subdir):
@@ -85,7 +85,8 @@ class Checker:
         self.ninja = find_tool("ninja", "ninja-build/bin")
         if not self.cmake:
             raise StepFailed("cmake not found (PATH, or the firmware's dbt toolchain)")
-        self.env = dict(os.environ)
+        # The tests read the firmware (pack/, fat_image.py, deluge.cpp, the RZ/A1 headers) from here too.
+        self.env = dict(os.environ, DELUGE_FIRMWARE_DIR=str(self.firmware_dir))
         if self.ninja:
             self.env["PATH"] = str(Path(self.ninja).parent) + os.pathsep + self.env.get("PATH", "")
 
@@ -104,7 +105,7 @@ class Checker:
                              "*.wav, *.img):\n" + "\n".join("    " + p for p in bad))
         print("  ok  factory-content guard")
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests/tools", "-t", "."], "tool-tests.log",
-            TEST_TIMEOUT_S)
+            TEST_TIMEOUT_S, env=self.env)
         run([sys.executable, "tools/startup_guard.py", "--source", self.firmware_dir / "src/deluge/deluge.cpp"],
             "startup-guard.log", 60)
 
@@ -126,8 +127,11 @@ class Checker:
             return
         deps = subprocess.run([self.ninja, "-C", str(build_dir), "-t", "deps"], capture_output=True, text=True,
                               timeout=120, check=True).stdout
-        firmware_headers = str(self.firmware_dir / "src/RZA1/system/iodefine")
-        bad = sorted({line.strip() for line in deps.splitlines() if line.strip().startswith(firmware_headers)})
+        # Resolved on both sides: ninja logs paths as the compiler saw them (symlinks, "..").
+        firmware_headers = os.path.realpath(self.firmware_dir / "src/RZA1/system") + "/iodefine"
+        bad = sorted({path for path in (os.path.realpath(line.strip()) for line in deps.splitlines()
+                                        if line.startswith(" ") and line.strip())
+                      if path.startswith(firmware_headers)})
         if bad:
             raise StepFailed("include check: the firmware's own register headers were compiled in, not the host "
                              "ones:\n" + "\n".join("    " + b for b in bad))

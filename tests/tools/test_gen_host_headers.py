@@ -1,5 +1,6 @@
 """gen_host_headers.py: host register headers, and its guard against raw peripheral addresses."""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "engine/platform/gen_host_headers.py"
-FIRMWARE_SRC = ROOT / "firmware/src"
+FIRMWARE_SRC = Path(os.environ.get("DELUGE_FIRMWARE_DIR", ROOT / "firmware")) / "src"
 
 CPU_SPECIFIC = """#ifndef SYSTEM_CPU_SPECIFIC_H_
 #define SYSTEM_CPU_SPECIFIC_H_
@@ -55,6 +56,23 @@ class GenHostHeaders(unittest.TestCase):
             r = run(src, out)
             self.assertEqual(r.returncode, 1)
             self.assertIn("0xE8200000", r.stderr)
+
+    def test_fails_on_an_address_outside_the_mapped_windows(self):
+        # host_io.h maps 0x3FE00000-0x3FFFFFFF only; a lower 0x3F address would underflow its offset.
+        with tempfile.TemporaryDirectory() as d:
+            src, out = Path(d) / "src", Path(d) / "out"
+            fake_firmware(src, "#define ODD (*(struct st_odd *)0x3F000000uL)\n")
+            r = run(src, out)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("0x3F000000", r.stderr)
+
+    def test_writes_nothing_when_it_fails(self):
+        # A retried build must not find a broken header that looks up to date.
+        with tempfile.TemporaryDirectory() as d:
+            src, out = Path(d) / "src", Path(d) / "out"
+            fake_firmware(src, "#define DMAC0 \\\n    (*(struct st_dmac *)0xE8200000uL)\n")
+            self.assertEqual(run(src, out).returncode, 1)
+            self.assertFalse(out.exists() and any(p.is_file() for p in out.rglob("*")))
 
     def test_the_pinned_firmware_leaves_no_raw_address(self):
         with tempfile.TemporaryDirectory() as d:

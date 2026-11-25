@@ -118,19 +118,24 @@ set(PLATFORM_SOURCES
   engine/platform/host_testport.cpp)
 
 # ---- Flags. The firmware's own (src/CMakeLists.txt's add_compile_options), plus the Engine's (spec §3.3):
-# the test port in every build, no fused multiply-add, and DELUGE_HOST for the host seams (S4).
+# the test port in every build, no fused multiply-add, and DELUGE_HOST for the host seams (S4). Everything that
+# includes firmware headers (firmware, engine/platform, front ends) gets these through the firmware target.
 set(FW_DEFINES ENABLE_SYSEX_TEST=1 DELUGE_HOST=1 USE_TASK_MANAGER _GNU_SOURCE)
 set(FW_FLAGS
   -ffast-math -fsigned-char -ffp-contract=off
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti;-fno-threadsafe-statics>"
-  # Firmware warnings aren't ours to fix here, but a pointer truncation must fail the build (seam S1; no
-  # -fms-extensions). In C++ clang already makes those errors; these make the C ones errors too.
-  -Wno-everything -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast
-  -Werror=void-pointer-to-int-cast -Werror=int-to-void-pointer-cast
   # The firmware's own cpu_specific.h must stay a no-op behind the host one (host_prefix.h): if its body were ever
   # read, its UNCACHED_MIRROR_OFFSET would redefine the host's.
   -Werror=macro-redefined
   -include "${CMAKE_CURRENT_SOURCE_DIR}/engine/platform/host_prefix.h")
+# A pointer truncation must fail the build (seam S1; no -fms-extensions). In C++ clang already makes those errors;
+# these make the C ones errors too.
+set(CAST_ERRORS -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast
+  -Werror=void-pointer-to-int-cast -Werror=int-to-void-pointer-cast)
+# Warnings in firmware sources aren't ours to fix here: off for the firmware target only.
+set(FW_PRIVATE_FLAGS -Wno-everything ${CAST_ERRORS})
+# The Engine's own code keeps its warnings. Firmware headers count as system headers there (firmware's SYSTEM).
+set(ENGINE_WARNINGS -Wall -Wextra -Wno-unused-parameter -Wno-overriding-option ${CAST_ERRORS})
 set(FW_INCLUDES
   "${GEN}/host"             # generated RZ/A1 headers win over the firmware's
   "${CMAKE_CURRENT_SOURCE_DIR}/engine/platform"
@@ -145,24 +150,27 @@ set(FW_INCLUDES
   "${FW}/src/lib")
 
 if(DELUGE_SANITIZE)
-  # Spec §11: the sanitizer build is -O1. A UB report stops the run instead of scrolling past.
-  # Two UBSan checks are off, because the firmware relies on what both the Deluge's CPU and arm64 do
-  # (docs/implementation-notes.md):
-  # - float-cast-overflow: the DSP code converts INT32_MAX-scaled floats to int32 (freeverb.cpp:90 on the first
-  #   render), relying on the conversion saturating. ARMv7's vcvt and arm64's fcvtzs both saturate.
-  # - alignment: FatFS loads little-endian words through casts at any address (ff.c:617 ld_word, "simplified by
-  #   Rohan"). Both CPUs allow unaligned plain loads and stores.
-  set(SAN_FLAGS -O1 -g -fsanitize=address,undefined -fno-sanitize=float-cast-overflow,alignment
-      -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  # Spec §11: the sanitizer build is -O1, with every ASan and UBSan check on everywhere; a UB report stops the run
+  # instead of scrolling past. ubsan_ignorelist.txt exempts single firmware files from single checks, each with its
+  # reason there and in docs/implementation-notes.md.
+  set(SAN_FLAGS -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
+      "-fsanitize-ignorelist=${CMAKE_CURRENT_SOURCE_DIR}/engine/platform/ubsan_ignorelist.txt")
 endif()
 
-add_library(firmware OBJECT ${FW_SOURCES} ${NE10_SOURCES} ${PLATFORM_SOURCES})
+add_library(firmware OBJECT ${FW_SOURCES} ${NE10_SOURCES})
 add_dependencies(firmware host_headers)
-set_target_properties(firmware PROPERTIES C_STANDARD 23 C_EXTENSIONS ON CXX_STANDARD 23 CXX_EXTENSIONS ON)
+set_target_properties(firmware PROPERTIES C_STANDARD 23 C_EXTENSIONS ON CXX_STANDARD 23 CXX_EXTENSIONS ON
+  SYSTEM ON)
 target_compile_definitions(firmware PUBLIC ${FW_DEFINES})
-target_compile_options(firmware PUBLIC ${FW_FLAGS} ${SAN_FLAGS})
+target_compile_options(firmware PUBLIC ${FW_FLAGS} ${SAN_FLAGS} PRIVATE ${FW_PRIVATE_FLAGS})
 target_include_directories(firmware PUBLIC ${FW_INCLUDES})
 target_link_libraries(firmware PUBLIC argon etl::etl)
+
+# The hardware stand-ins (spec §3.5).
+add_library(engine_platform OBJECT ${PLATFORM_SOURCES})
+set_target_properties(engine_platform PROPERTIES C_STANDARD 23 C_EXTENSIONS ON CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_link_libraries(engine_platform PUBLIC firmware)
+target_compile_options(engine_platform PRIVATE ${ENGINE_WARNINGS})
 
 # Until the noteRowId fix (#53, firmware PR #535) is on the pin: these two files read an uninitialised noteRowId,
 # which clang turns into an E380 freeze. Zero-initialising locals does what #535 does. Drop this when the pin moves
@@ -175,5 +183,7 @@ set_source_files_properties(
 
 # ---- The first render: one preset and one note to a WAV. E4 replaces it with `deluge-engine render`.
 add_executable(render_preset engine/cli/render_preset.cpp)
-target_link_libraries(render_preset PRIVATE firmware)
+set_target_properties(render_preset PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_link_libraries(render_preset PRIVATE engine_platform firmware)
+target_compile_options(render_preset PRIVATE ${ENGINE_WARNINGS})
 target_link_options(render_preset PRIVATE -Wl,-dead_strip ${SAN_FLAGS})

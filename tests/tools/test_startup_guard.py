@@ -1,6 +1,7 @@
 """startup_guard.py: the text hash of deluge_main and registerTasks (spec §3.4)."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -53,7 +54,9 @@ class StartupGuard(unittest.TestCase):
             self.assertEqual(json.loads(stored.read_text())["registerTasks"], before)
 
     def test_the_pinned_firmware_matches_the_stored_hashes(self):
-        r = subprocess.run([sys.executable, str(ROOT / "tools/startup_guard.py")], capture_output=True, text=True)
+        firmware = Path(os.environ.get("DELUGE_FIRMWARE_DIR", ROOT / "firmware"))  # tools/check.py --firmware-dir
+        r = subprocess.run([sys.executable, str(ROOT / "tools/startup_guard.py"), "--source",
+                            str(firmware / "src/deluge/deluge.cpp")], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 

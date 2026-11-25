@@ -16,14 +16,15 @@ def git(repo, *args):
 
 
 def repo_with(files):
+    """A repo with one commit holding `files`. They go straight into the index, as a commit can carry them even when
+    .gitignore or a case-insensitive file system would stop them in a checkout (the spike's commit did)."""
     d = tempfile.TemporaryDirectory()
     repo = Path(d.name)
     git(repo, "init", "-q")
+    blob = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=b"x", check=True,
+                          capture_output=True).stdout.decode().strip()
     for name in files:
-        (repo / name).parent.mkdir(parents=True, exist_ok=True)
-        (repo / name).write_bytes(b"x")
-    # -f: a real checkout's .gitignore would refuse these, but a commit can still carry them (the spike's did).
-    git(repo, "add", "-f", ".")
+        git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
     git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "test")
     return d, repo
 
@@ -35,10 +36,11 @@ class FactoryGuard(unittest.TestCase):
             self.assertEqual(check.factory_violations(repo), ["build/x.wav"])
 
     def test_wav_img_and_build_anywhere(self):
-        d, repo = repo_with(["tests/fixture.WAV", "cards/deluge_sd.img", "build/notes.txt", "engine/a.cpp"])
+        # Build/ too: macOS's file system ignores case, so it is the same folder as build/.
+        d, repo = repo_with(["tests/fixture.WAV", "cards/deluge_sd.img", "build/notes.txt", "Build/x.o", "engine/a.cpp"])
         with d:
             self.assertEqual(check.factory_violations(repo),
-                             ["build/notes.txt", "cards/deluge_sd.img", "tests/fixture.WAV"])
+                             ["Build/x.o", "build/notes.txt", "cards/deluge_sd.img", "tests/fixture.WAV"])
 
     def test_clean_tree_passes(self):
         d, repo = repo_with(["engine/build.cpp", "tools/wav_stats.py", "docs/img/screen.png"])
