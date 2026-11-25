@@ -11,7 +11,7 @@ Background:
 - `prototype/screens/` on branch `prototype/screens` (commit f0b02bf): the reference design for the GUI.
 - The decisions: [the map](https://github.com/gismya/deluge-engine/issues/15) and its tickets #16 to #21.
 
-Some sections carry a note that starts **Under review**. Each names a decision the user may change after reading the review on [#20](https://github.com/gismya/deluge-engine/issues/20). Until the user answers, build what the section says.
+The user answered the review on [#20](https://github.com/gismya/deluge-engine/issues/20), and this spec has the answers. One note still starts **Under review**: Setup routing (§5), which waits for the spike in [#42](https://github.com/gismya/deluge-engine/issues/42). Until it answers, build what the section says.
 
 ## 1. Goals and non-goals
 
@@ -28,28 +28,25 @@ Out of scope for v1:
 - the GUI as a screen for a real Deluge (v2 stretch). The protocol leaves room for it (§7.8).
 - steering a Piece live from the GUI
 - CPU-load voice culling (§10)
-- song-level FX set from the host or from a song file. Presets play under the blank song's defaults, and Perform sets its own song FX.
+- song-level FX set from the host or from a song file. Presets play under the blank song's defaults, and Perform sets its own song FX. A later release adds it: [#41](https://github.com/gismya/deluge-engine/issues/41).
 - plugins (AU, VST)
 - Engines for Linux, Windows and Android. The GUI is written so it can run there later.
 - a signed, notarised or sandboxed app (§12)
 - audio input and sampling, CV and gate
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 6):** song-level FX set from the host was a v1 goal in the first spec. It has no message and no screen now, so this revision leaves it out.
 
 ## 2. Standing rules
 
 - The Engine compiles the **actual firmware source**, never a copy or a rewrite.
 - The firmware is a git submodule at `firmware/` (§3.3).
 - **Firmware seams:** avoid new ones. Small ones are allowed when needed. Each goes as its own PR to gismya/deluge-generative, and `./dbt sizediff` must show the ARM Release build unchanged.
-- **Merging firmware seam PRs:** the agent may merge one into `generative` when the **Run tests** check is green, `./dbt sizediff` shows no change, and the PR has at most about 30 lines of non-mechanical change. Mechanical `uintptr_t` cast changes don't count toward the 30 lines. A larger seam, or one that changes the size, waits for the user. It never blocks Engine work, because the Engine builds from `engine-seams` (§4).
+- **Merging firmware seam PRs:** the agent may merge one into `generative`, whatever its size, when `./dbt sizediff` shows no change, the **Run tests** check is green and a review pass is done. A seam that changes the Release build waits for the user. Under this rule the agent merges S1 to S4 and S6. S5 changes Release, so it waits, and the Engine uses its fallback (§3.4).
+- **Conflicts on `generative`:** the firmware's own milestone run may merge there in the same week. Whoever merges second brings their branch up to date first.
 - **Merging in this repo:** the agent may merge its own PRs when CI is green and a review pass found nothing it must fix.
 - **Test content:** CI uses only CC0 content: the firmware's `pack/` folder (see `pack/LICENSES.md`) plus fixtures the repo generates. The factory card (171 synths, 43 kits, 397 MB of samples) has no licence statement. Never commit it, renders of it or excerpts of it, and never upload it anywhere. Factory Parity runs only locally. Preset names and metric numbers in reports are fine.
 - **No speakers.** Agents and CI run the Engine with `--audio null`.
 - **Every Engine build includes the test port** (`ENABLE_SYSEX_TEST`). Engine builds and References then use the same flags.
 - **No CPU-load culling in v1.** The Engine reports its voice count instead.
 - Licence: GPL-3.0, like the firmware.
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 2):** the 30-line limit. Seams S5 and S6 are larger and will wait for the user. The review proposes letting the agent merge a seam of any size when it exists only under `ENABLE_SYSEX_TEST` and `sizediff` shows no change.
 
 ## 3. Architecture
 
@@ -76,9 +73,9 @@ Compile nearly all of `firmware/src/deluge` (plus `OSLikeStuff`, `fatfs`, `NE10`
 
 ### 3.3 Building against the firmware
 
-- **The pin.** `firmware/` is pinned to a commit of gismya/deluge-generative. It must contain seam S7, so it is at or after `generative` ddeef7fad. While any seam PR is unmerged, the pin is a commit on the firmware branch `engine-seams` (§4). When all are merged, the pin is a commit on `generative`. Moving the pin is a deliberate commit that reruns every check.
+- **The pin.** `firmware/` is pinned to a commit of gismya/deluge-generative. It is a commit on `generative` that contains seam S7 (ddeef7fad or later) and seams S1 to S4. Moving the pin is a deliberate commit that reruns every check. The run moves it only to take a merged seam.
 - **Compile in place.** Don't copy the firmware tree. `src/definitions.h:3` includes its sibling `RZA1/cpu_specific.h`, which beats `-I` overrides. That header has a classic include guard (`SYSTEM_CPU_SPECIFIC_H_`), so pre-including the host version through the prefix header turns the real one into a no-op. E1 proves this. Fallbacks, in order: clang's `-ivfsoverlay`, then a 2-line `#ifndef` seam.
-- **Flags.** The firmware's own (`-std=gnu++23`, `-ffast-math`), plus `-DENABLE_SYSEX_TEST=1` on every file and `-ffp-contract=off`. Set FPCR.FZ (flush denormals to zero) on the engine thread. Once S1 is on the pin, drop `-fms-extensions` so new pointer truncations fail the build.
+- **Flags.** The firmware's own (`-std=gnu++23`, `-ffast-math`), plus `-DENABLE_SYSEX_TEST=1` on every file and `-ffp-contract=off`. Set FPCR.FZ (flush denormals to zero) on the engine thread. Don't use the spike's `-fms-extensions`: with S1 on the pin, a new pointer truncation must fail the build.
 - **Register headers.** A script generates host versions of the RZ/A1 register headers (`iodefine`) so registers live in host RAM. It fails if any raw `0xE8…`/`0xFC…` peripheral address cast survives in its output.
 - Point `UNUSED_MEMORY_SPACE_ADDRESS` (`cpu_specific.h:124`, written at `voice_sample.cpp:1479`) at a host scratch buffer.
 - Take the argon and etl pins from `firmware/lib/CMakeLists.txt` rather than repeating them.
@@ -146,7 +143,7 @@ The firmware's probe times its expects by the wall clock, so script runs need `-
 - The **audio backend** only drains the FIFO. CoreAudio does it from its callback. The null backend does it from a timer and throws the frames away, or writes them to a file for tests. Latency is the FIFO target, plus up to 128 ring frames, plus the device buffer.
 - **MIDI in:** the CoreMIDI callback pushes bytes onto a single-producer queue, and the engine thread feeds them to the DIN UART stand-in. v1 delivers each event at once, so timing jitters by up to one buffer.
 - **Commands** from the protocol go on a queue. A host task registered with the firmware scheduler drains it. It skips a turn while `sdRoutineLock` is set, as `test_port.cpp` does for its own lines. Other threads read state from snapshots the engine thread publishes.
-- **The player** mixes a Render's WAV, or an auditioned sample, into the output after the FIFO. It doesn't go through the firmware (§6.5).
+- **The player** plays a WAV file by path, a Render or an auditioned sample, and mixes it into the output after the FIFO. It doesn't go through the firmware (§6.5), so it works before the firmware runs live.
 - **Watchdog.** A separate thread watches the engine thread. If no audio frame was produced for 2 s of wall time while the backend wanted frames, it reports a freeze with code `HANG` and exits the process.
 
 ### 3.9 Engine API and CLI
@@ -172,29 +169,22 @@ Each seam is a small PR to gismya/deluge-generative. The contents of S1 to S5 ar
 | S2 | `swapEndianness32/2x16` asm only on `__arm__`, else `__builtin_bswap32` | silently returns 0 on arm64 | F1 |
 | S3 | Clang portability: headers, missing includes, `0L`, `strrchr`, the VLA initializer, `__arm__` guards on the PMU asm and the 3 Generative layout `static_assert`s, `PLACE_*` macros empty when not ELF; plus the uninitialised `noteRowId` fix (`instrument_clip.cpp:963-1033`) | doesn't build with clang; the UB turns into an E380 freeze | F2 |
 | S4 | The `String::set` S001 check asks the allocator instead of comparing with `EXTERNAL_MEMORY_END` | a host allocator can't meet fixed address ranges | F3 |
-| S5 | Split `deluge_main` into hardware init, engine init and `registerTasks()` | the host reuses the firmware's own startup (§3.4). Optional. | F5 |
+| S5 | Split `deluge_main` into hardware init, engine init and `registerTasks()` | the host reuses the firmware's own startup (§3.4). Optional. It changes the Release build, so the user merges it. | F5 |
 | S6 | Test-port lines `load synth PATH`, `load kit PATH` and `midi S D1 D2`, modelled on `load song`. Only under `ENABLE_SYSEX_TEST`. | the preset Reference in delugemu (§9) | F4 |
 | S7 | Test-port lines `next recipe …` that set the Recipe and Seed the next roll takes | choosing a Piece at run time (§6.1) | none: merged |
 
 **S7 is delivered.** The firmware built it in gismya/deluge-generative#527 and #528, both merged (`generative` at ddeef7fad). It is not an Engine ticket. Its lines are documented in the firmware's `docs/generative/spec/21-testing.md` §21.3, and `gen_emu.py capture` sends the same lines.
 
-**`engine-seams`.** Unmerged seams don't live in this repo. They live on a branch in the firmware repo:
-
-- `engine-seams` is `generative` plus the branch of every seam PR that is open with green checks. The orchestrator creates it, merges seam branches into it, and pushes it with `git delugepush`. It never opens a PR from it.
-- The submodule pins a commit of `engine-seams`. The delugemu Reference builds from the same commit, so both sides run the same firmware.
-- An F ticket counts as done for the tickets that depend on it once its PR's checks are green and its branch is on `engine-seams`. Whether the PR is merged into `generative` is a separate matter, under §2.
-- When `generative` gains a merged seam, merge `generative` into `engine-seams`. When every seam is merged, pin `generative` and delete `engine-seams`.
+**Seams merge into `generative` directly,** under §2. A ticket that needs a seam is blocked until the seam's PR is merged and the pin has moved to a commit that contains it. There is no branch of unmerged seams and no `patches/` folder.
 
 Firmware rules apply to these PRs: the firmware's `AGENTS.md` (hooks, `git delugepush`, the **Run tests** check, `docs/upstream-candidates.md` for fixes that aren't Generative-specific, which is all of S1 to S4).
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 2):** `engine-seams` replaces the first spec's `patches/` folder. It exists so that a seam waiting for the user's merge blocks nothing.
 
 ## 5. Setups
 
 A Setup is a list of bindings. Each binding is a MIDI channel (1 to 16) and a Synth or Kit preset path. The Engine plays all of them at once from MIDI: a message on channel c from any input goes to the preset bound to c. A channel with no binding is ignored.
 
 - **In the firmware,** a Setup is a song in memory with one instrument per binding. Each instrument's MIDI input is learned to its channel (`Instrument::midiInput`, the field the firmware saves as `inputMidiChannel`). Each instrument needs an active clip, or it ignores note input (`melodic_instrument.cpp:531`).
-- **Building it.** Two routes, tried in this order. E11 uses the first one that works and records why.
+- **Building it.** Two routes. The spike in [#42](https://github.com/gismya/deluge-engine/issues/42) picks one, and E11 builds the one it picks.
   1. Host code adds a clip and its instrument to the running song for each binding, with the firmware's own functions, and sets `midiInput`. Changing one binding touches only that instrument, so the others keep sounding.
   2. The Engine writes a song file with one clip per binding into the card overlay (§3.6) and loads it with `load song`. Every Setup change then reloads the song, with a gap in the sound.
 - **Changes.** The GUI sends the whole Setup each time (§7.3). The Engine compares it with what is loaded and changes only the bindings that differ.
@@ -203,7 +193,7 @@ A Setup is a list of bindings. Each binding is a MIDI channel (1 to 16) and a Sy
 - **A single preset** in the CLI (`--preset PATH`) is routed by MIDI follow from any channel, set up as the test port's `hold midi_setup` does.
 - **Audition** uses a 17th instrument that is in no binding. `Audition{path, note}` loads the preset there if it isn't the one loaded, and plays the note for the given time. The Setup is unchanged. For a `.wav` path (a lane's sample), the player plays the file from the card folder.
 
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 5):** nothing has tested several instruments in one in-memory song yet.
+> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 5):** nothing has tested several instruments in one in-memory song yet. [#42](https://github.com/gismya/deluge-engine/issues/42) tests it, and this section is finalised from its answer.
 
 ## 6. Pieces
 
@@ -233,7 +223,7 @@ next recipe lane 0 SAMPLES/DRUMS/Snare/909 Snare.wav
 2. Inject the `next recipe` lines.
 3. Enter Perform with the genre and wait for `gen_next_recipe taken`. The entry lines are a text file in this repo (`engine/cli/piece_entry.txt`), written from the firmware's `perform_next_recipe.txt` and from what `gen_emu.py capture` sends. A pin move reruns the Piece tests, which catch a menu that changed.
 4. Press PLAY. Record audio from the `gen_start` event for the requested length (default 60 s, at most 20 minutes).
-5. Write the WAV (44.1 kHz, stereo, 24-bit) and report the result.
+5. Write the WAV (44.1 kHz, stereo, 24-bit) to the path the request gives, and report the result.
 
 The result (`RenderDone`, §7.5) carries:
 
@@ -244,17 +234,16 @@ The result (`RenderDone`, §7.5) carries:
   1. Perform's own log of the Piece, which Capture writes its songs from, read by host code at the end of the render.
   2. The firmware harness's `generator_render --midi-only` on the same Recipe and Seed, built from the submodule. `gen_emu.py` already uses it to check captures.
   3. No notes. The Timeline then shows the Sections and empty rows, and the ticket's handoff says so.
-- **Warnings:** each sound the firmware reported missing or silent (`gen_sound_missing`), and the peak voice count.
+- **Warnings:** each sound the firmware reported missing or silent (`gen_sound_missing`).
+- **The peak voice count** over the render (§10).
 
 The same request renders the same bytes every time. A freeze during a render ends the worker, and the live Engine reports `RenderFailed` with the freeze code.
 
 A card folder without the Generative pack plays FX lanes with no sample as silence, as the Deluge does. The warnings name them.
 
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 4):** the notes field and its three sources are new in this revision. The decisions named no source for the Timeline's notes.
-
 ### 6.3 Genres and Palettes
 
-The Engine sends the GUI the list of genres. Each has its Parts in roster order, the lanes of its Drums and FX Parts, and for each Part and lane its Palette: the sounds and their weights. A sound's share of re-rolls is its weight over the Palette's total. Host code reads all of it from the firmware's genre and Palette tables after the card is ready, so Palette override files on the card count. The GUI has no genre knowledge built in.
+The Engine sends the GUI the list of genres. Each has its Parts in roster order, the lanes of its Drums and FX Parts, and for each Part and lane its Palette: the sounds and their weights. A sound's share of re-rolls is its weight over the Palette's total. Host code reads all of it from the firmware's genre and Palette tables after the card is ready, so Palette override files on the card count. Until the firmware runs live in the Engine (E12), a short-lived helper process reads the lists: `deluge-engine list --card FOLDER`. The GUI has no genre knowledge built in.
 
 If a table can't be read from host code without a firmware change, add a getter under `ENABLE_SYSEX_TEST` as a seam PR (§2, §4).
 
@@ -262,24 +251,20 @@ If a table can't be read from host code without a firmware change, add a getter 
 
 - The live Engine starts one worker process per `RenderPiece`. At most two run at once. More wait in a queue.
 - A worker's stdout carries its progress and result as protocol frames. The live Engine passes them on.
-- `CancelRender` kills the worker and deletes its file.
+- A worker writes to `<path>.part` and renames it when the render is done. `CancelRender` kills the worker and removes the `.part` file.
 - Live sound never stops for a render, and A and B render in parallel.
 
 ### 6.5 Playing and keeping Renders
 
-- The player in the live Engine plays one Render at a time. `Play{render, position}` starts it or switches to it. Switching between A and B at the same position has no gap. The player sends `Position` about 10 times a second.
-- Renders are `<id>.wav` in `~/Library/Caches/deluge-engine/renders/`, with a small file beside each holding its `RenderDone`. The GUI chooses the id.
-- **Deletion.** The Engine deletes a Render as soon as it is none of: the current A, the current B, one of the 10 newest, or kept. It sends `RenderDeleted{id}` for each. The GUI tells the Engine which Renders are A, B and kept with `SetRenderSlots` (§7.5). The Engine deletes nothing until it has received that message once since it started. On `Shutdown`, it deletes everything that isn't kept.
-- At start the Engine lists the render folder, so Renders survive an Engine restart.
-- "Export WAV…" is the GUI copying the file and marking the Render kept.
+**The GUI owns the Render files.** The Engine writes a WAV to the path it is given and plays a WAV by path. It never lists, keeps or deletes Renders.
 
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 3):** `SetRenderSlots` and the folder scan are new in this revision. Without them the Engine can't know what A, B and kept are. The review proposes that the GUI delete the files itself.
+- `RenderPiece` carries the path to write. The GUI puts Renders in `~/Library/Caches/deluge-engine/renders/` and stores each Render's `RenderDone` beside its WAV.
+- The player plays one file at a time. `Play{path, position}` starts it or switches to it. Switching between A and B at the same position has no gap. The player sends `Position` about 10 times a second.
+- **The keep rule,** applied by the GUI: it deletes a Render as soon as it is none of the current A, the current B, one of the 10 most recent, or kept. A Render is kept when the user marks it or exports it with "Export WAV…", which copies the file. On quit the GUI deletes everything that isn't kept. Before deleting the file that is playing, it sends `Stop`.
 
 ### 6.6 Pieces live
 
-`PlayPiece{recipe}` makes the live Engine enter Perform and play the Piece in real time, with the same lines as §6.2. `StopPiece` leaves Perform. While a Piece plays live, the Setup is unloaded, and the Engine loads it again after `StopPiece`. The capability `play_live` is absent until this works, and the GUI hides the "Play live" button without it. This is the last v1 ticket.
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 7):** the review proposes moving Pieces live to v2.
+`PlayPiece{recipe}` makes the live Engine enter Perform and play the Piece in real time, with the same lines as §6.2. `StopPiece` leaves Perform. While a Piece plays live, the Setup is unloaded, and the Engine loads it again after `StopPiece`. The capability `play_live` is absent until this works, and the GUI hides the "Play live" button without it. This is the last v1 ticket and a stretch goal: nothing depends on it.
 
 ## 7. The protocol
 
@@ -297,9 +282,9 @@ The Engine's first message is `Hello{protocol_version, engine_version, firmware_
 
 ### 7.3 State
 
-- **The GUI owns the documents:** the card folder, the Setup's bindings, each Piece's genre, Seed and Sound picks, the device choices, and which Renders are A, B and kept. It saves them in `~/Library/Application Support/deluge-engine/state.json`.
+- **The GUI owns the documents:** the card folder, the Setup's bindings, each Piece's genre, Seed and Sound picks, the device choices, the settings, and the Renders with their files (§6.5). It saves them in `~/Library/Application Support/deluge-engine/state.json`.
 - **Commands state the whole result,** not an edit. `SetSetup` carries every binding each time.
-- **The Engine keeps nothing across a restart** except the files in the render folder. It replies with what it applied, with an error per item that failed.
+- **The Engine keeps nothing across a restart.** It replies with what it applied, with an error per item that failed.
 - **The Backend supplies the lists:** the presets on the card, and the genres with their Parts, lanes and Palettes.
 
 ### 7.4 Messages: card, Setup, devices, status
@@ -308,12 +293,12 @@ GUI to Engine:
 
 | Message | Fields | Effect |
 |---|---|---|
-| `SetCard` | `folder` | build or refresh the card image, boot the firmware on it, send `CardStatus`, then `Catalog` and `Genres` |
+| `SetCard` | `folder` | build or refresh the card image, send `CardStatus`, then `Catalog` and `Genres` |
 | `SetSetup` | `bindings[]{channel, path}` | apply the Setup (§5), answer `SetupApplied` |
 | `Audition` | `path, note, velocity, ms` | play a sound briefly (§5) |
 | `Note` | `channel, note, velocity, on` | as MIDI from the on-screen keyboard |
 | `SetDevices` | `audio_output, midi_inputs[]` | pick the output and the inputs. Empty means the system default output and every input. |
-| `Shutdown` | | delete unkept Renders and exit with status 0 |
+| `Shutdown` | | exit with status 0 |
 
 Engine to GUI:
 
@@ -335,10 +320,9 @@ GUI to Engine:
 
 | Message | Fields |
 |---|---|
-| `RenderPiece` | `id, recipe, length_s` |
+| `RenderPiece` | `id, recipe, length_s, wav_path` |
 | `CancelRender` | `id` |
-| `SetRenderSlots` | `a, b, kept[]` (§6.5) |
-| `Play` | `id, position_s` |
+| `Play` | `wav_path, position_s` |
 | `Seek` | `position_s` |
 | `Stop` | |
 | `PlayPiece`, `StopPiece` | `recipe` (§6.6) |
@@ -352,9 +336,7 @@ Engine to GUI:
 | `RenderProgress` | `id, done_s, total_s` |
 | `RenderDone` | `id, wav_path, duration_s, recipe` (as played), `sections[]{name, time_s}`, `peaks`, `notes[]`, `warnings[]`, `peak_voices` |
 | `RenderFailed` | `id, error, freeze_code` |
-| `RenderDeleted` | `id` |
-| `Renders` | the Renders found in the folder at start, each as its `RenderDone` |
-| `Position` | `id, time_s`, while playing |
+| `Position` | `wav_path, time_s`, while playing |
 
 ### 7.6 Adding to the protocol
 
@@ -363,7 +345,7 @@ A ticket may add fields to a message. A new kind of message is a spec change. Du
 ### 7.7 Freezes and hangs
 
 - The Engine's protocol thread sends `Heartbeat`, not the engine thread. So building a card image or loading a large preset doesn't look like a hang. The watchdog (§3.8) turns a stuck engine thread into a `Freeze` with code `HANG`.
-- The GUI restarts the Engine when the process exits without a `Shutdown`, when it receives `Freeze`, or after 2 s without a `Heartbeat`. After a restart it sends the card, the Setup, the devices and the render slots again.
+- The GUI restarts the Engine when the process exits without a `Shutdown`, when it receives `Freeze`, or after 2 s without a `Heartbeat`. After a restart it sends the card, the Setup and the devices again.
 - After 3 restarts within a minute the GUI stops restarting. It shows the last freeze code and a Restart button.
 - The status bar shows each freeze's code and what was loaded.
 
@@ -380,12 +362,14 @@ A Flutter app in `gui/`, for macOS in v1. It is written with nothing that stops 
 - **Shell.** A top bar with **Piece | Setup**, the card folder, the Engine's state, the voice count and a `{}` control that shows the state for debugging. A status line at the bottom.
 - **First launch.** With no card folder, the app shows one screen that asks for it. While the card image builds, it shows the progress.
 - **Setup screen.** The 16 MIDI channels as a 4×4 grid of pads, the picker beside it, and an audition keyboard below. A pad shows its preset, Synth or Kit, MIDI activity and a clear button.
-- **Piece screen.** One bar with **Compare | Timeline** tabs, then Genre, Seed, the tempo and key as played, Auto-render, Play live and Render B.
+- **Piece screen.** One bar with **Compare | Timeline** tabs, then Genre, Seed, the tempo and key as played, Auto-render, Play live and Render B. Play live is hidden until the Backend offers `play_live`.
   - **Compare:** the A and B waveforms on one time axis with the Sections between them, then a table with A's Sound pick beside the working pick for every Part and lane, differing rows tinted, a copy-back arrow per row, "Revert to A" and "Keep B as A".
   - **Timeline:** a row per Part and lane showing its notes across the Sections, with the two Renders as rows on the same time axis and one playhead through everything.
   - The tabs hold no state. The selected row, A/B, the playhead, the playing Render and whether the picker is open live in one model, so switching tabs only changes the view.
 - **The picker** is the one way to change a sound, on both tabs and in Setup. It shows the selected row's Palette as pads with each sound's share of re-rolls, then a search over every preset. A tap picks and auditions. It sits beside the screen, or below it under 900 dp wide, and folds to a rail.
 - **The working picks.** After a genre or Seed change, the GUI renders with no picks, and the Recipe as played in that Render gives the working picks. From then on it sends every pick. With Auto-render on, a pick renders B again. A newer auto-render cancels an older one that hasn't finished.
+- **Renders.** The GUI owns the files and applies the keep rule (§6.5).
+- **Voice count.** Each Render shows its peak voice count beside it. The app's settings hold a threshold, and a Render above it is highlighted. The threshold has no default: until the user sets it, after calibrating on a Deluge, nothing is highlighted.
 - **Sizing.** Dark mode only. Controls are 44 dp inside 48 dp hit areas, on every platform. Nothing needs a hover, a right click, a drag or a keyboard. Keyboard shortcuts are extras, as the prototype's README lists them.
 - **Known gaps in the prototype, to fix:** the audition keyboard's black keys are under 48 dp wide, and at small sizes the Timeline doesn't scroll a selected lane into view.
 
@@ -397,7 +381,7 @@ A Flutter app in `gui/`, for macOS in v1. It is written with nothing that stops 
 **Tests.**
 - Widget tests and golden tests run headless with `flutter test`, against `FakeBackend`. Goldens cover Setup, Compare and Timeline, with the picker open and closed, at 1440×900, 1100×720, 1280×800 and 800×1280.
 - Golden images compare with a tolerance of 0.5% of pixels, because text rendering differs between macOS versions. CI is the reference machine.
-- One `integration_test` drives the built app against the real Engine with `--audio null` on `pack/` content (G5).
+- `integration_test`s drive the built app against the real Engine with `--audio null` on `pack/` content: the Piece flow (G5), then Setups and a restart (G7).
 - The fake data may use factory preset names. It never includes factory audio.
 
 ## 9. Parity
@@ -471,13 +455,11 @@ Piece Parity is local only. CI checks that a Piece on `pack/` content renders th
 
 ## 10. Host behaviour that differs
 
-- **Culling and direness.** On the Deluge, CPU load drops voices and switches oscillators, interpolation and the ladder filter to cheaper versions (`oscillator.cpp:74`, `sample_controls.cpp:37`, `lpladder.cpp:69`). The virtual clock keeps direness at 0 in the Engine. v1 has no culling and reports the voice count, live and as each Render's peak. A dense Piece may sound richer in the Engine than on the Deluge. The user accepted that.
+- **Culling and direness.** On the Deluge, CPU load drops voices and switches oscillators, interpolation and the ladder filter to cheaper versions (`oscillator.cpp:74`, `sample_controls.cpp:37`, `lpladder.cpp:69`). The virtual clock keeps direness at 0 in the Engine. v1 has no culling and reports the voice count, live and as each Render's peak. A dense Piece may sound richer in the Engine than on the Deluge. The user accepted that. The GUI highlights a Render whose peak passes a threshold the user sets (§8).
 - **Card writes** are dropped (§3.6).
 - **MIDI timing** jitters by up to one buffer (§3.8).
 - **Render window:** checked by the Parity tools (§9.1).
 - **FMA and denormals:** not audible. `-ffp-contract=off` and FZ (§3.3) keep the Engine close anyway.
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 8):** the review proposes a warning in the GUI when a Render's peak voice count passes a number the user picks.
 
 ## 11. CI and checks
 
@@ -490,7 +472,7 @@ Piece Parity is local only. CI checks that a Piece on `pack/` content renders th
   - the real-time path on the null backend, driven by injected MIDI bytes
   - the protocol, driven by `tools/engine_client.py` over the socket
   - a Piece with every pick set to `pack/` content, rendered twice and compared bit for bit
-- **GUI job:** install Flutter with `subosito/flutter-action`, pinned to one version. Run `flutter analyze` and `flutter test`. The `integration_test` against the real Engine runs once G5 lands.
+- **GUI job:** install Flutter with `subosito/flutter-action`, pinned to one version. Run `flutter analyze` and `flutter test`. The `integration_test`s against the real Engine run once G5 lands.
 - Every test has a timeout, and a freeze aborts the run.
 - A nightly canary builds against the tip of the firmware's `generative` branch and opens an issue labelled `needs-triage` when it fails. The orchestrator doesn't act on canary issues.
 - **One check script,** `tools/check.py`, runs everything CI runs. Agents run it before pushing. E1 creates it, and each ticket adds its tests to it.
@@ -511,23 +493,22 @@ Out of scope: a Developer ID signature, notarisation, a DMG, automatic updates a
 
 ### 13.1 Order
 
-The user set this order:
+When several tickets are free, take the one earliest in this list. The dependencies in the table are the only hard limits.
 
-1. Synth presets offline
-2. real time with one instrument
-3. Setups
-4. Kits
-5. Pieces offline
-6. song FX Parity
-7. Pieces live
+1. **Foundations and presets offline:** F1 to F4, E1, E2, E3, E4.
+2. **Pieces offline, usable in the app:** E14, E10, E21, E15, E16 in the Engine, and G1, G3, G5, G6 in the GUI.
+3. **Parity:** E5, E6, E7 for presets, E17 for Pieces, E18 for song FX, E20 for DX7.
+4. **Real time:** E8, E9.
+5. **Setups:** E11, E12, with G2 and G7.
+6. **Kits:** E13.
+7. **The Timeline tab:** G4, the last GUI screen. Compare never waits for it.
+8. **Pieces live:** E19, a stretch goal. Then F5.
 
-The GUI and the protocol run beside it as a second track. The GUI builds against `FakeBackend`, so it never waits for the Engine. When several tickets are free, take the one earliest in this order. The dependencies in the table are the only hard limits.
-
-> **Under review ([#20](https://github.com/gismya/deluge-engine/issues/20), item 1):** the review proposes moving Pieces offline (E14 to E16, with G3) ahead of real time and Setups. The dependencies already allow it: E14 needs only E4.
+The GUI is a second track. It builds against `FakeBackend` from the day the protocol schema lands (E10), so it never waits for the Engine. Run one Engine ticket and one GUI ticket at a time when both are free.
 
 ### 13.2 Tickets
 
-F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets (GUI) are PRs to this repo. All are sub-issues of [#1](https://github.com/gismya/deluge-engine/issues/1), with blocking links that match the last column. Each is sized for one agent session.
+F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets (GUI) are PRs to this repo. All are sub-issues of [#1](https://github.com/gismya/deluge-engine/issues/1), with blocking links that match the last column. Each is sized for one agent session. The IDs are names, not an order: §13.1 gives the order.
 
 | ID | Issue | Ticket | Spec | Blocked by |
 |---|---|---|---|---|
@@ -535,34 +516,37 @@ F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets 
 | F2 | #3 | S3: clang portability and the `noteRowId` fix | §4 | |
 | F3 | #4 | S4: allocator-based S001 check | §4 | |
 | F4 | #5 | S6: test-port `load synth`, `load kit` and `midi` lines | §4, §9.1 | |
-| F5 | #22 | S5: split `deluge_main` (optional, waits for the user) | §3.4, §4 | |
-| E1 | #6 | Build: CMake, submodule on `engine-seams`, in-place compile, check script, CI | §3.3, §11 | F1, F2, F3 |
+| F5 | #22 | S5: split `deluge_main` (optional, the user merges it) | §3.4, §4 | |
+| E1 | #6 | Build: CMake, submodule, in-place compile, check script, CI | §3.3, §11 | F1, F2, F3 |
 | E2 | #7 | Platform layer: virtual clock, scheduler startup, allocator, freezes | §3.4, §3.5 | E1 |
 | E3 | #8 | Card image: builder, sector device, read-time model, write overlay | §3.6 | E1 |
 | E4 | #9 | Engine API and `deluge-engine render` for a preset | §3.7, §3.9 | E2, E3 |
 | E5 | #10 | Parity: the Reference driver for presets | §9.1, §9.2 | E4, F4 |
 | E6 | #23 | Parity: metrics, calibration, report, listening pack, smoke tier | §9.1, §9.4 | E5 |
 | E7 | #24 | Parity: the full synth tier and its fixes | §9.1, §9.2 | E6 |
-| E8 | #11 | Real time: the pump on the null backend, `deluge-engine play` | §3.8 | E4 |
-| E9 | #25 | CoreAudio and CoreMIDI backends | §3.8 | E8 |
-| E10 | #26 | Protocol: schema, code generation, `serve`, Python client | §7.1, §7.2, §7.7 | E8 |
+| E8 | #11 | Real time: the pump, `deluge-engine play` | §3.8 | E4, E21 |
+| E9 | #25 | CoreMIDI input | §3.8 | E8 |
+| E10 | #26 | Protocol: schema, code generation, `serve`, Python client | §7.1, §7.2 | E1 |
 | E11 | #27 | Setups in the firmware | §5 | E8 |
-| E12 | #28 | Protocol: card, catalog, Setup, notes, audition, devices | §7.4 | E9, E10, E11 |
+| E12 | #28 | Protocol: the firmware live in `serve`, Setup, notes, audition, MIDI devices | §7.4, §7.7 | E9, E11, E15 |
 | E13 | #12 | Kits: in Setups, and the Kit Parity tier | §5, §9.1 | E6, E11 |
 | E14 | #29 | Pieces offline: the Perform driver and `render --piece` | §6.1, §6.2 | E4 |
-| E15 | #30 | Protocol: genres, render workers, `RenderPiece` | §6.3, §6.4, §7.5 | E10, E14 |
-| E16 | #31 | The Render player and Render deletion | §6.5, §7.5 | E15 |
+| E15 | #30 | Protocol: card, catalog, genres, render workers, `RenderPiece` | §6.3, §6.4, §7.4, §7.5 | E10, E14 |
+| E16 | #31 | The Render player | §6.5, §7.5 | E15, E21 |
 | E17 | #32 | Piece Parity | §9.3 | E6, E14 |
 | E18 | #33 | Song FX Parity | §9 | E7, E17 |
-| E19 | #34 | Pieces live | §6.6 | E11, E15 |
+| E19 | #34 | Pieces live (stretch goal) | §6.6 | E12 |
 | E20 | #14 | DX7 kernel | §9.1 | E6 |
+| E21 | #47 | Audio output: null and CoreAudio backends | §3.8 | E1 |
 | G1 | #35 | GUI: app shell, design system, Backend client, fake Backend, CI | §8, §7.7 | E10 |
 | G2 | #36 | GUI: Setup screen and the picker | §8 | G1 |
-| G3 | #37 | GUI: Piece screen, Compare tab | §8 | G1 |
+| G3 | #37 | GUI: Piece screen, Compare tab, the keep rule | §8, §6.5 | G1 |
 | G4 | #38 | GUI: Timeline tab | §8 | G3 |
-| G5 | #39 | App bundle, end-to-end test against the real Engine, README | §12, §11 | G2, G3, G4, E12, E16 |
+| G5 | #39 | App bundle, end-to-end test of the Piece flow, README | §12, §11 | G3, E16 |
+| G6 | #50 | GUI: peak voice count and its threshold setting | §8, §10 | G3 |
+| G7 | #51 | End-to-end test of Setups and a restart | §11 | G2, G5, E12 |
 
-The first spec's E8 (song-level FX set from the host, #13) is closed. E18 replaces it.
+E11 is also blocked by the spike [#42](https://github.com/gismya/deluge-engine/issues/42), which is not a v1 ticket. The first spec's E8 (song-level FX set from the host, #13) is closed. E18 replaces it, and [#41](https://github.com/gismya/deluge-engine/issues/41) holds host-set song FX for a later release.
 
 ## 14. Running unattended
 
@@ -573,7 +557,7 @@ The user is away for about a week, and an orchestrator runs the tickets. It foll
 **No design question should need the user.** Where this spec gives a default or a list of fallbacks, take it and record which one. Where the spec is silent, the implementer picks the simplest thing that meets the ticket, records the choice in the handoff and in the PR, and goes on. That includes a new protocol message (§7.6).
 
 **Park a ticket** only when:
-- a firmware seam shows a `sizediff` change. A seam over the 30-line limit is not parked: its PR waits for the user with `ready-for-human`, its branch goes on `engine-seams`, and work goes on.
+- a firmware seam shows a `sizediff` change. Its PR waits for the user with `ready-for-human`.
 - a firmware change would touch Generative-mode behaviour
 - a Parity failure survives one full session of work on it. Record the metrics and what was tried.
 - every fallback the spec lists for the ticket has failed
@@ -591,7 +575,7 @@ The user is away for about a week, and an orchestrator runs the tickets. It foll
 3. Parity turning into a bit-exactness chase. The tolerances are the bar.
 4. Hangs. Every test has a timeout, and freezes abort.
 5. Setups: several instruments in one in-memory song is untested (§5).
-6. The firmware moving under the pin. Don't move the pin during the run except to take a seam.
-7. Two orchestrators on one machine. The firmware's own milestone run may share `generative` and the emulator slot pool. Expect merge conflicts on F1 and slow `check_all.py` runs, and merge `generative` into the F branches rather than rebasing.
+6. The firmware moving under the pin. Don't move the pin during the run except to take a merged seam.
+7. Two orchestrators on one machine. The firmware's own milestone run may share `generative` and the emulator slot pool. Expect merge conflicts on F1 and slow `check_all.py` runs. Whoever merges second brings their branch up to date first.
 
 **When the user is back** they read the state file's top section: what merged, what is open, the questions, the Parity report and the listening pack's path, and which defaults and fallbacks the run took.
