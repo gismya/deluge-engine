@@ -110,7 +110,7 @@ file(GLOB_RECURSE FW_SOURCES CONFIGURE_DEPENDS
 list(FILTER FW_SOURCES EXCLUDE REGEX "/src/deluge/drivers/")
 list(FILTER FW_SOURCES EXCLUDE REGEX "/src/OSLikeStuff/timers_interrupts/timers_interrupts\\.c$")
 list(FILTER FW_SOURCES EXCLUDE REGEX "/src/OSLikeStuff/fault_handler/")
-list(FILTER FW_SOURCES EXCLUDE REGEX "/src/deluge/memory/(general_memory_allocator|memory_region)\\.cpp$")
+list(FILTER FW_SOURCES EXCLUDE REGEX "/src/deluge/memory/(general_memory_allocator|memory_region|operators)\\.cpp$")
 # NE10: the C sources its own CMakeLists lists (its .s files are ARMv7-only headers).
 file(READ "${FW}/src/NE10/CMakeLists.txt" ne10_cmake)
 string(REGEX MATCHALL "[A-Za-z0-9_/.]+\\.(cpp|c)" NE10_REL "${ne10_cmake}")
@@ -189,12 +189,34 @@ target_include_directories(engine_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/e
 target_link_libraries(engine_platform PUBLIC firmware)
 target_compile_options(engine_platform PRIVATE ${ENGINE_WARNINGS})
 
-# ---- The first render: one preset and one note to a WAV. E4 replaces it with `deluge-engine render`.
-add_executable(render_preset engine/cli/render_preset.cpp)
-set_target_properties(render_preset PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
-target_link_libraries(render_preset PRIVATE engine_platform firmware)
-target_compile_options(render_preset PRIVATE ${ENGINE_WARNINGS})
-target_link_options(render_preset PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
+# ---- Engine core API (E4, spec §3.7 & §3.9).
+# engine_core_obj compiles against firmware/platform headers (-fno-rtti, host_prefix.h); engine_core exposes a plain
+# C++ header boundary (engine/core/engine.h, wav.h, midi_input.h) so front ends linking protobuf/RTTI never inherit
+# firmware compile flags or macros.
+add_library(engine_core_obj OBJECT engine/core/engine.cpp)
+set_target_properties(engine_core_obj PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_include_directories(engine_core_obj PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine")
+target_link_libraries(engine_core_obj PRIVATE engine_platform firmware)
+target_compile_options(engine_core_obj PRIVATE ${ENGINE_WARNINGS})
+
+add_library(engine_core STATIC
+  engine/core/wav.cpp
+  engine/core/midi_input.cpp)
+set_target_properties(engine_core PROPERTIES CXX_STANDARD 23)
+target_include_directories(engine_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine")
+target_compile_options(engine_core PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
+target_link_libraries(engine_core INTERFACE
+  $<TARGET_OBJECTS:engine_core_obj>
+  $<TARGET_OBJECTS:engine_platform>
+  $<TARGET_OBJECTS:firmware>
+  $<LINK_ONLY:argon>)
+
+# ---- Engine core unit & integration tests (E4, spec §3.7 & §3.9).
+add_executable(test_engine tests/core/test_engine.cpp)
+set_target_properties(test_engine PROPERTIES CXX_STANDARD 23)
+target_compile_options(test_engine PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
+target_link_libraries(test_engine PRIVATE engine_core)
+target_link_options(test_engine PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
 
 # ---- Platform-layer unit tests (E2, spec §3.4 & §3.5).
 add_executable(test_platform tests/platform/test_platform.cpp)
@@ -246,11 +268,13 @@ target_include_directories(engine_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/eng
 target_compile_options(engine_server PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
 target_link_libraries(engine_server PUBLIC engine_proto)
 
-add_executable(deluge-engine engine/cli/main.cpp)
+add_executable(deluge-engine
+  engine/cli/main.cpp
+  engine/cli/render_cmd.cpp)
 set_target_properties(deluge-engine PROPERTIES CXX_STANDARD 23)
 target_compile_options(deluge-engine PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
-target_link_libraries(deluge-engine PRIVATE engine_server)
-target_link_options(deluge-engine PRIVATE ${SAN_FLAGS})
+target_link_libraries(deluge-engine PRIVATE engine_server engine_core)
+target_link_options(deluge-engine PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
 
 add_executable(test_protocol_unit tests/protocol/test_protocol_unit.cpp)
 set_target_properties(test_protocol_unit PROPERTIES CXX_STANDARD 23)

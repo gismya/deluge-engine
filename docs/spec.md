@@ -527,6 +527,7 @@ F tickets are PRs to gismya/deluge-generative. E tickets (Engine) and G tickets 
 | F4 | #5 | S6: test-port `load synth`, `load kit` and `midi` lines | §4, §9.1 | |
 | F5 | #22 | S5: split `deluge_main` (optional, the user merges it) | §3.4, §4 | |
 | F6 | #53 | S3b: the noteRowId fix (changes Release, the user merges it) | §4 | |
+| F7 | #62 | firmware seam: free GMA-allocated objects through the allocator (DELUGE_HOST) | §4 | |
 | E1 | #6 | Build: CMake, submodule, in-place compile, check script, CI | §3.3, §11 | F1, F2, F3 |
 | E2 | #7 | Platform layer: virtual clock, scheduler startup, allocator, freezes | §3.4, §3.5 | E1 |
 | E3 | #8 | Card image: builder, sector device, read-time model, write overlay | §3.6 | E1 |

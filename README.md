@@ -13,6 +13,6 @@ git submodule update --init firmware
 python3 tools/check.py            # builds build/asan and build/release, runs every check CI runs
 ```
 
-`build/release/render_preset` renders one note of a preset from a FAT32 card image to a WAV file (`DELUGE_SD_IMAGE=card.img build/release/render_preset "SYNTHS/X.XML" out.wav`).
+`build/release/deluge-engine render` renders notes or a MIDI file on a Synth or Kit preset from a card folder to a 24-bit WAV (`build/release/deluge-engine render --card firmware/pack --preset "SYNTHS/GENERATIVE/GEN Sine Sub.XML" --notes "C4:1.0" --out out.wav --audio null`).
 
 The firmware comes from [gismya/deluge-generative](https://github.com/gismya/deluge-generative), a fork of the [Deluge community firmware](https://github.com/SynthstromAudible/DelugeFirmware). GPL-3.0.

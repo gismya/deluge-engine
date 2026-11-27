@@ -42,6 +42,13 @@ void setAudioSink(AudioSinkFn sink);
 uint64_t dmaFrames();
 uint64_t dmaOverruns();
 
+// ---- DIN MIDI input stand-in (spec §3.7)
+// Feeds raw MIDI bytes to uartGetCharWithTiming(TIMING_CAPTURE_ITEM_MIDI) so the firmware's own MIDI parser handles
+// them. Single-threaded (engine thread).
+bool injectDinMidi(const uint8_t* bytes, size_t len);
+size_t pendingDinMidiBytes();
+void clearDinMidi();
+
 // ---- Allocator: stealable byte budget and LRU eviction (spec §3.5)
 constexpr size_t kDefaultStealableBudgetBytes = 1024ull * 1024 * 1024; // 1 GiB
 

@@ -155,6 +155,8 @@ class Checker:
             f"{name}-platform.log", TEST_TIMEOUT_S, env=env)
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/storage", "-t", "."],
             f"{name}-storage.log", TEST_TIMEOUT_S, env=env)
+        run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/core", "-t", "."],
+            f"{name}-core.log", TEST_TIMEOUT_S, env=env)
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/smoke", "-t", "."],
             f"{name}-smoke.log", TEST_TIMEOUT_S, env=env)
         run([self.proto_python(), "-m", "unittest", "discover", "-v", "-s", "tests/protocol", "-t", "."],
