@@ -126,7 +126,8 @@ set(PLATFORM_SOURCES
   engine/platform/host_startup.cpp
   engine/platform/hw_stubs.cpp
   engine/platform/usb_stubs.c
-  engine/platform/host_diskio.c
+  engine/platform/host_diskio.cpp
+  engine/platform/card_image.cpp
   engine/platform/host_fm_kernel.c
   engine/platform/host_testport.cpp)
 
@@ -201,6 +202,13 @@ set_target_properties(test_platform PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON
 target_link_libraries(test_platform PRIVATE engine_platform firmware)
 target_compile_options(test_platform PRIVATE ${ENGINE_WARNINGS})
 target_link_options(test_platform PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
+
+# ---- Card-image & storage unit tests (E3, spec §3.6).
+add_executable(test_storage tests/storage/test_storage.cpp)
+set_target_properties(test_storage PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_link_libraries(test_storage PRIVATE engine_platform firmware)
+target_compile_options(test_storage PRIVATE ${ENGINE_WARNINGS})
+target_link_options(test_storage PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
 
 # ---- Protocol schema and server (E10, spec §7).
 # C++ protobuf code is generated at build time (never committed); Python and Dart come from tools/gen_proto.py.

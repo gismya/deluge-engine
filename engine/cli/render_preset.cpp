@@ -3,7 +3,8 @@
 // auditions one note from a host scheduler task, and captures audio from the simulated SSI DMA sink.
 // Writes a 44.1 kHz stereo 32-bit WAV; never opens an audio device. E4 replaces it with `deluge-engine render`.
 //
-// usage: DELUGE_SD_IMAGE=card.img render_preset [--pace F] [--audio null] SYNTHS/FOO.XML out.wav [note] [held s] [total s]
+// usage: render_preset [--card FOLDER] [--card-cache DIR] [--pace F] [--audio null] SYNTHS/FOO.XML out.wav [note] [held s] [total s]
+// If --card is omitted, reads the card image path from DELUGE_SD_IMAGE.
 // A firmware freeze prints FREEZE_WITH_ERROR with what was loaded and a backtrace, then exits with status 70.
 #include "OSLikeStuff/scheduler_api.h"
 #include "definitions_cxx.hpp"
@@ -14,6 +15,7 @@
 #include "model/model_stack.h"
 #include "model/note/note_row.h"
 #include "model/song/song.h"
+#include "platform/card_image.h"
 #include "platform/host_platform.h"
 #include "storage/cluster/cluster.h"
 #include "storage/storage_manager.h"
@@ -22,6 +24,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace plat = deluge::engine::platform;
@@ -147,9 +151,17 @@ void hostRenderTask() {
 
 int render(int argc, char** argv) {
 	double paceVal = 0.0;
+	std::string cardFolder;
+	std::string cardCacheDir;
 	std::vector<const char*> positional;
 	for (int i = 1; i < argc; i++) {
-		if (std::strcmp(argv[i], "--pace") == 0 && i + 1 < argc) {
+		if (std::strcmp(argv[i], "--card") == 0 && i + 1 < argc) {
+			cardFolder = argv[++i];
+		}
+		else if (std::strcmp(argv[i], "--card-cache") == 0 && i + 1 < argc) {
+			cardCacheDir = argv[++i];
+		}
+		else if (std::strcmp(argv[i], "--pace") == 0 && i + 1 < argc) {
 			paceVal = std::atof(argv[++i]);
 		}
 		else if (std::strcmp(argv[i], "--audio") == 0 && i + 1 < argc) {
@@ -169,8 +181,8 @@ int render(int argc, char** argv) {
 	}
 
 	if (positional.size() < 2) {
-		std::fprintf(stderr,
-		             "usage: render_preset [--pace F] [--audio null] SYNTHS/X.XML out.wav [note] [held s] [total s]\n");
+		std::fprintf(stderr, "usage: render_preset [--card FOLDER] [--card-cache DIR] [--pace F] [--audio null] "
+		                     "SYNTHS/X.XML out.wav [note] [held s] [total s]\n");
 		return 2;
 	}
 	const char* presetPath = positional[0];
@@ -181,6 +193,26 @@ int render(int argc, char** argv) {
 	gHeldFrames = static_cast<uint64_t>(held * kSampleRate);
 	gTotalFrames = static_cast<uint64_t>(total * kSampleRate);
 	gOut.reserve(static_cast<size_t>(gTotalFrames * 2));
+
+	if (!cardFolder.empty()) {
+		// Build or refresh the FAT32 card image on its own thread before booting the firmware (spec §3.6).
+		plat::CardImageOptions opts;
+		opts.cacheDir = cardCacheDir;
+		plat::CardImageResult built;
+		std::thread builder([&]() { built = plat::buildOrRefreshCardImage(cardFolder, opts); });
+		builder.join();
+		if (!built.ok) {
+			std::fprintf(stderr, "card image build failed: %s\n", built.error.c_str());
+			return 1;
+		}
+		if (!plat::openCardImage(built.imagePath)) {
+			std::fprintf(stderr, "failed to open card image: %s\n", built.imagePath.c_str());
+			return 1;
+		}
+		std::fprintf(stderr, "card ready: %s (rebuild=%d, written=%u, removed=%u, files=%u)\n",
+		             built.imagePath.c_str(), built.fullRebuild ? 1 : 0, built.filesWritten, built.filesRemoved,
+		             built.totalFiles);
+	}
 
 	plat::bootFirmware();
 	std::fprintf(stderr, "booted: Cluster::size %d\n", static_cast<int>(Cluster::size));
