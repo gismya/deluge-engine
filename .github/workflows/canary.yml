@@ -25,11 +25,15 @@ jobs:
           git -C firmware fetch --depth=1 origin generative
           git -C firmware checkout --detach FETCH_HEAD
           echo "sha=$(git -C firmware rev-parse --short=9 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Dart SDK
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: '3.14.0'
       - name: Tools
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app
           clang --version
-          brew install ninja
+          brew install ninja protobuf
       - name: Check
         run: python3 tools/check.py
       - name: Logs

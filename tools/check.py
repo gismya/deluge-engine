@@ -6,8 +6,8 @@
     python3 tools/check.py --firmware-dir ~/source/deluge-generative-wt   build against another firmware checkout
 
 Steps, in order (each has a timeout, and the first failure stops the run):
-  guards         the factory-content guard, the tool tests, the startup text-hash guard
-  asan           configure and build build/asan (ASan + UBSan, -O1), check its includes, run the smoke tests
+  guards         the factory-content guard, the protobuf codegen check, the tool tests, the startup text-hash guard
+  asan           configure and build build/asan (ASan + UBSan, -O1), check its includes, run platform, smoke and protocol tests
   release        the same for build/release (-O2)
   pointer-keys   the firmware's PointerKeyTests (tests/unit/pointer_keys), built natively: 64-bit, which the
                  firmware's own CI never runs (it builds its tests -m32)
@@ -26,6 +26,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / "build/check"
+sys.path.insert(0, str(ROOT / "tools"))
+import proto_env  # noqa: E402
 
 CONFIGURE_TIMEOUT_S = 900  # the first configure clones argon and etl
 BUILD_TIMEOUT_S = 3600
@@ -89,6 +91,15 @@ class Checker:
         self.env = dict(os.environ, DELUGE_FIRMWARE_DIR=str(self.firmware_dir))
         if self.ninja:
             self.env["PATH"] = str(Path(self.ninja).parent) + os.pathsep + self.env.get("PATH", "")
+        self._proto_python = None
+
+    def proto_python(self):
+        if self._proto_python is None:
+            try:
+                self._proto_python = proto_env.ensure_python_protobuf()
+            except Exception as e:
+                raise StepFailed(f"python protobuf environment: {e}") from e
+        return self._proto_python
 
     def generator(self):
         return ["-G", "Ninja"] if self.ninja else []
@@ -104,7 +115,8 @@ class Checker:
             raise StepFailed("factory-content guard: tracked files that must never be committed (build output, "
                              "*.wav, *.img):\n" + "\n".join("    " + p for p in bad))
         print("  ok  factory-content guard")
-        run([sys.executable, "-m", "unittest", "discover", "-s", "tests/tools", "-t", "."], "tool-tests.log",
+        run([sys.executable, "tools/gen_proto.py", "--check"], "proto-check.log", 180, env=self.env)
+        run([self.proto_python(), "-m", "unittest", "discover", "-s", "tests/tools", "-t", "."], "tool-tests.log",
             TEST_TIMEOUT_S, env=self.env)
         run([sys.executable, "tools/startup_guard.py", "--source", self.firmware_dir / "src/deluge/deluge.cpp"],
             "startup-guard.log", 60)
@@ -120,6 +132,8 @@ class Checker:
             f"{name}-platform.log", TEST_TIMEOUT_S, env=env)
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/smoke", "-t", "."],
             f"{name}-smoke.log", TEST_TIMEOUT_S, env=env)
+        run([self.proto_python(), "-m", "unittest", "discover", "-v", "-s", "tests/protocol", "-t", "."],
+            f"{name}-protocol.log", TEST_TIMEOUT_S, env=env)
 
     def check_includes(self, build_dir):
         """No translation unit may read the firmware's own register headers: the generated host ones replace them
