@@ -1,0 +1,7 @@
+{
+  "protoc_version": "36.2",
+  "protoc_osx_universal_sha256": "83d0dc80672f53486f54299bca6177159f9cad1fd54d4d3143eeea53c4423e1b",
+  "python_protobuf_version": "7.36.2",
+  "dart_protoc_plugin_version": "25.1.0",
+  "dart_protobuf_package": "^6.1.0"
+}

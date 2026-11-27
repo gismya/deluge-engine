@@ -321,6 +321,7 @@ Engine to GUI:
 | `MidiActivity` | `channel`, at most 10 a second per channel |
 | `Devices` | `audio_outputs[]`, `midi_inputs[]`, sent at start and when they change |
 | `Freeze` | `code, message, loaded`, sent just before the Engine exits |
+| `ErrorReply` | `command, message`, sent when a command isn't supported or fails outside a dedicated reply (e.g. unimplemented command, full audition channels, missing WAV during playback) |
 
 ### 7.5 Messages: Pieces and Renders
 

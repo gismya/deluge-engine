@@ -47,6 +47,11 @@ if(NOT DELUGE_COMPILER_HAS_P2280)
     "see docs/implementation-notes.md.")
 endif()
 
+find_package(protobuf CONFIG QUIET)
+if(NOT protobuf_FOUND)
+  message(FATAL_ERROR "protobuf (C++ library and protoc) not found. On macOS, run `brew install protobuf`.")
+endif()
+
 # The argon and etl pins come from the firmware's own list (spec §3.3), not repeated here. Both build configurations
 # share one download folder.
 include(FetchContent)
@@ -83,11 +88,17 @@ set(PROJECT_VERSION_PATCH ${CMAKE_MATCH_3})
 set(PROJECT_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
 execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD WORKING_DIRECTORY "${FW}"
   OUTPUT_VARIABLE GIT_COMMIT_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD WORKING_DIRECTORY "${FW}"
+  OUTPUT_VARIABLE GIT_COMMIT_FULL OUTPUT_STRIP_TRAILING_WHITESPACE)
 set(BUILD_VERSION_STRING "${PROJECT_VERSION}-engine-${GIT_COMMIT_SHORT}")
 set(BUILD_VERSION_STRING_SHORT "c${PROJECT_VERSION}")
 configure_file("${FW}/src/deluge/version/version.h.in" "${GEN}/version.h" @ONLY)
 configure_file("${FW}/src/deluge/version/version.cpp.in" "${GEN}/version.cpp.gen" @ONLY)
 configure_file("${FW}/src/deluge/util/firmware_version.h.in" "${GEN}/util/firmware_version.h" @ONLY)
+file(WRITE "${GEN}/engine_version.h"
+  "#pragma once\n"
+  "#define DELUGE_ENGINE_VERSION \"${BUILD_VERSION_STRING}\"\n"
+  "#define DELUGE_FIRMWARE_COMMIT \"${GIT_COMMIT_FULL}\"\n")
 
 # ---- Firmware sources: compiled in place from the checkout, never copied (spec §2, §3.2).
 file(GLOB_RECURSE FW_SOURCES CONFIGURE_DEPENDS
@@ -190,3 +201,51 @@ set_target_properties(test_platform PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON
 target_link_libraries(test_platform PRIVATE engine_platform firmware)
 target_compile_options(test_platform PRIVATE ${ENGINE_WARNINGS})
 target_link_options(test_platform PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
+
+# ---- Protocol schema and server (E10, spec §7).
+# C++ protobuf code is generated at build time (never committed); Python and Dart come from tools/gen_proto.py.
+# Kept separate from the `firmware` target so it builds with RTTI enabled and without firmware macros/host_prefix.h.
+set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/engine.proto")
+set(PROTO_GEN_DIR "${GEN}/proto")
+set(PROTO_PB_H "${PROTO_GEN_DIR}/engine.pb.h")
+set(PROTO_PB_CC "${PROTO_GEN_DIR}/engine.pb.cc")
+add_custom_command(
+  OUTPUT "${PROTO_PB_H}" "${PROTO_PB_CC}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${PROTO_GEN_DIR}"
+  COMMAND $<TARGET_FILE:protobuf::protoc>
+          "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto"
+          "--cpp_out=${PROTO_GEN_DIR}"
+          "${PROTO_FILE}"
+  DEPENDS "${PROTO_FILE}" protobuf::protoc
+  COMMENT "Generating C++ protobuf bindings from proto/engine.proto"
+  VERBATIM)
+
+add_library(engine_proto STATIC "${PROTO_PB_CC}")
+set_target_properties(engine_proto PROPERTIES CXX_STANDARD 23 SYSTEM ON)
+# Protobuf 36+ turns on PROTOBUF_MESSAGE_GLOBALS under ASan, which changes global table layout vs Homebrew's
+# prebuilt libprotobuf.dylib; opt out so every TU still compiles under full ASan + UBSan (docs/implementation-notes.md).
+target_compile_definitions(engine_proto PUBLIC PROTOBUF_MESSAGE_GLOBALS_TEMPORARY_OPTOUT=1)
+target_compile_options(engine_proto PRIVATE -Wno-everything ${SAN_FLAGS})
+target_include_directories(engine_proto PUBLIC "${GEN}")
+target_link_libraries(engine_proto PUBLIC protobuf::libprotobuf)
+
+add_library(engine_server STATIC
+  engine/server/framing.cpp
+  engine/server/handler.cpp
+  engine/server/server.cpp)
+set_target_properties(engine_server PROPERTIES CXX_STANDARD 23)
+target_include_directories(engine_server PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine" "${GEN}")
+target_compile_options(engine_server PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
+target_link_libraries(engine_server PUBLIC engine_proto)
+
+add_executable(deluge-engine engine/cli/main.cpp)
+set_target_properties(deluge-engine PROPERTIES CXX_STANDARD 23)
+target_compile_options(deluge-engine PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
+target_link_libraries(deluge-engine PRIVATE engine_server)
+target_link_options(deluge-engine PRIVATE ${SAN_FLAGS})
+
+add_executable(test_protocol_unit tests/protocol/test_protocol_unit.cpp)
+set_target_properties(test_protocol_unit PROPERTIES CXX_STANDARD 23)
+target_compile_options(test_protocol_unit PRIVATE ${ENGINE_WARNINGS} ${SAN_FLAGS})
+target_link_libraries(test_protocol_unit PRIVATE engine_server)
+target_link_options(test_protocol_unit PRIVATE ${SAN_FLAGS})
