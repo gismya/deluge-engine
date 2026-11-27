@@ -7,6 +7,7 @@
 
 Steps, in order (each has a timeout, and the first failure stops the run):
   guards         the factory-content guard, the protobuf codegen check, the tool tests, the startup text-hash guard
+  gui            Flutter pub get, analyze, widget/golden tests, and macOS app build in gui/
   asan           configure and build build/asan (ASan + UBSan, -O1), check its includes, run platform, storage, smoke and protocol tests
   release        the same for build/release (-O2)
   pointer-keys   the firmware's PointerKeyTests (tests/unit/pointer_keys), built natively: 64-bit, which the
@@ -32,6 +33,9 @@ import proto_env  # noqa: E402
 CONFIGURE_TIMEOUT_S = 900  # the first configure clones argon and etl
 BUILD_TIMEOUT_S = 3600
 TEST_TIMEOUT_S = 900
+GUI_ANALYZE_TIMEOUT_S = 300
+GUI_TEST_TIMEOUT_S = 600
+GUI_BUILD_TIMEOUT_S = 900
 
 FACTORY_SUFFIXES = (".wav", ".img")
 
@@ -85,13 +89,22 @@ class Checker:
         self.jobs = jobs
         self.cmake = find_tool("cmake", "cmake/bin")
         self.ninja = find_tool("ninja", "ninja-build/bin")
-        if not self.cmake:
-            raise StepFailed("cmake not found (PATH, or the firmware's dbt toolchain)")
+        self.flutter = shutil.which("flutter")
         # The tests read the firmware (pack/, fat_image.py, deluge.cpp, the RZ/A1 headers) from here too.
         self.env = dict(os.environ, DELUGE_FIRMWARE_DIR=str(self.firmware_dir))
         if self.ninja:
             self.env["PATH"] = str(Path(self.ninja).parent) + os.pathsep + self.env.get("PATH", "")
         self._proto_python = None
+
+    def require_cmake(self):
+        if not self.cmake:
+            raise StepFailed("cmake not found (PATH, or the firmware's dbt toolchain)")
+        return self.cmake
+
+    def require_flutter(self):
+        if not self.flutter:
+            raise StepFailed("flutter not found on PATH")
+        return self.flutter
 
     def proto_python(self):
         if self._proto_python is None:
@@ -105,7 +118,7 @@ class Checker:
         return ["-G", "Ninja"] if self.ninja else []
 
     def build_command(self, build_dir, target=None):
-        cmd = [self.cmake, "--build", build_dir, "--parallel", str(self.jobs)]
+        cmd = [self.require_cmake(), "--build", build_dir, "--parallel", str(self.jobs)]
         return cmd + (["--target", target] if target else [])
 
     # ---- steps
@@ -121,10 +134,20 @@ class Checker:
         run([sys.executable, "tools/startup_guard.py", "--source", self.firmware_dir / "src/deluge/deluge.cpp"],
             "startup-guard.log", 60)
 
+    def gui(self):
+        flutter = self.require_flutter()
+        gui_dir = ROOT / "gui"
+        run([flutter, "pub", "get"], "gui-pub-get.log", GUI_ANALYZE_TIMEOUT_S, cwd=gui_dir, env=self.env)
+        run([flutter, "analyze", "--no-pub"], "gui-analyze.log", GUI_ANALYZE_TIMEOUT_S, cwd=gui_dir, env=self.env)
+        run([flutter, "test", "--no-pub"], "gui-test.log", GUI_TEST_TIMEOUT_S, cwd=gui_dir, env=self.env)
+        run([flutter, "build", "macos", "--no-pub"], "gui-build-macos.log", GUI_BUILD_TIMEOUT_S,
+            cwd=gui_dir, env=self.env)
+
     def engine(self, name, cmake_args):
         build_dir = ROOT / "build" / name
-        run([self.cmake, "-S", ROOT, "-B", build_dir, *self.generator(), f"-DDELUGE_FIRMWARE_DIR={self.firmware_dir}",
-             *cmake_args], f"{name}-configure.log", CONFIGURE_TIMEOUT_S, env=self.env)
+        run([self.require_cmake(), "-S", ROOT, "-B", build_dir, *self.generator(),
+             f"-DDELUGE_FIRMWARE_DIR={self.firmware_dir}", *cmake_args],
+            f"{name}-configure.log", CONFIGURE_TIMEOUT_S, env=self.env)
         run(self.build_command(build_dir), f"{name}-build.log", BUILD_TIMEOUT_S, env=self.env)
         self.check_includes(build_dir)
         env = dict(self.env, DELUGE_ENGINE_BUILD=str(build_dir))
@@ -157,7 +180,7 @@ class Checker:
 
     def pointer_keys(self):
         build_dir = ROOT / "build/firmware-tests"
-        run([self.cmake, "-S", self.firmware_dir / "tests", "-B", build_dir, *self.generator(),
+        run([self.require_cmake(), "-S", self.firmware_dir / "tests", "-B", build_dir, *self.generator(),
              "-DCMAKE_BUILD_TYPE=Debug"], "pointer-keys-configure.log", CONFIGURE_TIMEOUT_S, env=self.env)
         run(self.build_command(build_dir, "PointerKeyTests"), "pointer-keys-build.log", BUILD_TIMEOUT_S, env=self.env)
         binary = next(build_dir.rglob("PointerKeyTests"), None)
@@ -168,6 +191,7 @@ class Checker:
 
 STEPS = {
     "guards": lambda c: c.guards(),
+    "gui": lambda c: c.gui(),
     "asan": lambda c: c.engine("asan", ["-DCMAKE_BUILD_TYPE=Debug", "-DDELUGE_SANITIZE=ON"]),
     "release": lambda c: c.engine("release", ["-DCMAKE_BUILD_TYPE=Release", "-DDELUGE_SANITIZE=OFF"]),
     "pointer-keys": lambda c: c.pointer_keys(),
