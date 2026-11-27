@@ -179,6 +179,20 @@ void testNotesParser() {
 		CHECK(std::abs(seq.events[4].timeSeconds - 2.0) < 1e-9);
 	}
 
+	// At equal timestamps, note-off must precede note-on even when the later note appears earlier in the list.
+	CHECK_MSG(core::parseNotesList("60@0.5:0.5, 60@0.0:0.5", &seq, &err), err);
+	CHECK(seq.events.size() == 4);
+	if (seq.events.size() == 4) {
+		CHECK(std::abs(seq.events[0].timeSeconds - 0.0) < 1e-9);
+		CHECK(seq.events[0].bytes == (std::vector<uint8_t>{0x90, 60, 100}));
+		CHECK(std::abs(seq.events[1].timeSeconds - 0.5) < 1e-9);
+		CHECK(seq.events[1].bytes == (std::vector<uint8_t>{0x80, 60, 0x40})); // note-off first
+		CHECK(std::abs(seq.events[2].timeSeconds - 0.5) < 1e-9);
+		CHECK(seq.events[2].bytes == (std::vector<uint8_t>{0x90, 60, 100})); // note-on second
+		CHECK(std::abs(seq.events[3].timeSeconds - 1.0) < 1e-9);
+		CHECK(seq.events[3].bytes == (std::vector<uint8_t>{0x80, 60, 0x40}));
+	}
+
 	// Reject invalid inputs.
 	CHECK(!core::parseNotesList("", &seq, &err));
 	CHECK(!core::parseNotesList("128", &seq, &err));
@@ -233,6 +247,16 @@ void testMidiParser() {
 		CHECK(seq.events[3].bytes == (std::vector<uint8_t>{0x89, 36, 0x40}));
 	}
 	CHECK(std::abs(seq.durationSeconds - 2.5) < 1e-6);
+
+	// Reject Format 1 file declaring more tracks than present MTrk chunks.
+	std::vector<uint8_t> missingTrackSmf;
+	std::vector<uint8_t> hdr2;
+	pushU16BE(hdr2, 1);   // format 1
+	pushU16BE(hdr2, 2);   // declares 2 tracks
+	pushU16BE(hdr2, 480);
+	pushChunk(missingTrackSmf, "MThd", hdr2);
+	pushChunk(missingTrackSmf, "MTrk", trk0); // only 1 track chunk
+	CHECK(!core::parseMidiBytes(missingTrackSmf.data(), missingTrackSmf.size(), &seq, &err));
 
 	// Reject garbage.
 	const uint8_t bad[] = {'N', 'O', 'P', 'E'};
@@ -328,8 +352,8 @@ int runEngineTests(const std::string& kitCardDir, const std::string& tmpDir) {
 	CHECK(errors.size() > errorsBefore);
 	CHECK(engine.loadedPresetPath() == "SYNTHS/GENERATIVE/GEN Psy Bass.XML");
 
-	// Swap Synth -> Kit (CC0 kit with 2 drums: clap on note 36, ride on note 37).
-	auto kitRes = engine.loadPreset("KITS/TEST CC0 KIT.XML");
+	// Swap Synth -> Kit (CC0 kit with 2 drums: clap on note 36, ride on note 37), also testing leading '/'.
+	auto kitRes = engine.loadPreset("/KITS/TEST CC0 KIT.XML");
 	CHECK_MSG(kitRes.ok, kitRes.error);
 	CHECK(kitRes.kind == core::PresetKind::Kit);
 	CHECK_MSG(kitRes.drumCount == 2, "drumCount=" + std::to_string(kitRes.drumCount));
@@ -471,6 +495,8 @@ int runLoadAllTwice(const std::string& cardDir, const std::string& cacheDir) {
 	int sounding = 0;
 	int silent = 0;
 	size_t totalLoads = 0;
+	size_t stealablePass1 = 0;
+	size_t stealablePass2 = 0;
 
 	for (int pass = 1; pass <= 2; ++pass) {
 		for (const auto& [kind, relPath] : presets) {
@@ -494,13 +520,100 @@ int runLoadAllTwice(const std::string& cardDir, const std::string& cacheDir) {
 			engine.midi({0x80, note, 0x40});
 			engine.render(nullptr, relFrames);
 		}
+		if (pass == 1) {
+			stealablePass1 = engine.stealableBytesUsed();
+		}
+		else {
+			stealablePass2 = engine.stealableBytesUsed();
+		}
 	}
 
+	// Pass 2 repeats the exact same presets as pass 1, so stealable memory usage must stay bounded relative to pass 1
+	// (no unbounded cluster/AudioFile accumulation across repeated swaps).
+	const size_t maxAllowedStealable = stealablePass1 + 65536;
+	const bool memBounded = stealablePass2 <= maxAllowedStealable;
 	std::fprintf(stderr,
-	             "load-all-twice: presets=%zu total_loads=%zu failed=%d sounding=%d silent=%d overruns=%llu\n",
-	             presets.size(), totalLoads, failedLoads, sounding, silent,
+	             "load-all-twice: presets=%zu total_loads=%zu failed=%d sounding=%d silent=%d "
+	             "stealable_p1=%zu stealable_p2=%zu overruns=%llu\n",
+	             presets.size(), totalLoads, failedLoads, sounding, silent, stealablePass1, stealablePass2,
 	             static_cast<unsigned long long>(engine.dmaOverruns()));
-	return (failedLoads == 0 && engine.dmaOverruns() == 0) ? 0 : 1;
+	if (!memBounded) {
+		std::fprintf(stderr, "FAIL: stealable memory grew from %zu (pass 1) to %zu (pass 2), limit %zu\n",
+		             stealablePass1, stealablePass2, maxAllowedStealable);
+	}
+	return (failedLoads == 0 && engine.dmaOverruns() == 0 && memBounded) ? 0 : 1;
+}
+
+int runF7GrainFxSwapTest(const std::string& cardDir, const std::string& tmpDir) {
+	core::Engine engine;
+	core::Config cfg;
+	cfg.cardFolder = cardDir;
+	cfg.cardCacheDir = tmpDir + "/cache";
+	std::string err;
+	if (!engine.boot(cfg, &err)) {
+		std::fprintf(stderr, "boot failed: %s\n", err.c_str());
+		return 1;
+	}
+	auto r1 = engine.loadPreset("SYNTHS/TEST/GRAINFX.XML");
+	if (!r1.ok) {
+		std::fprintf(stderr, "load grainFX preset failed: %s\n", r1.error.c_str());
+		return 1;
+	}
+	std::vector<int32_t> buf(core::kSampleRate / 2 * 2);
+	engine.midi({0x90, 60, 100});
+	engine.render(buf.data(), core::kSampleRate / 2);
+	const double level = channelRms(buf, 4096, core::kSampleRate / 2, 0);
+	if (level <= 1e-4) {
+		std::fprintf(stderr, "grainFX preset rendered silence (rms=%g)\n", level);
+		return 1;
+	}
+	engine.midi({0x80, 60, 0x40});
+	// Swapping destroys the grainFX preset (~ModControllableAudio -> frees GMA-allocated grainFX).
+	auto r2 = engine.loadPreset("SYNTHS/GENERATIVE/GEN Sine Sub.XML");
+	if (!r2.ok) {
+		std::fprintf(stderr, "swap after grainFX failed: %s\n", r2.error.c_str());
+		return 1;
+	}
+	engine.midi({0x90, 60, 100});
+	engine.render(buf.data(), core::kSampleRate / 4);
+	std::fprintf(stderr, "test_engine --test-f7-grainfx: PASS (overruns=%llu)\n",
+	             static_cast<unsigned long long>(engine.dmaOverruns()));
+	return engine.dmaOverruns() == 0 ? 0 : 1;
+}
+
+int runF7ClusterLoadingSwapTest(const std::string& cardDir, const std::string& tmpDir) {
+	core::Engine engine;
+	core::Config cfg;
+	cfg.cardFolder = cardDir;
+	cfg.cardCacheDir = tmpDir + "/cache";
+	std::string err;
+	if (!engine.boot(cfg, &err)) {
+		std::fprintf(stderr, "boot failed: %s\n", err.c_str());
+		return 1;
+	}
+	// Trigger 4 long multi-cluster CC0 samples at once in a Kit, render only 32..128 frames so lookahead clusters
+	// are still queued in audioFileManager.loadingQueue (300 us + 40 us/sector read time), then swap away immediately
+	// to exercise AudioFileManager::removeReasonFromCluster() -> loadingQueue.erase(&cluster).
+	for (int iter = 0; iter < 4; ++iter) {
+		auto r1 = engine.loadPreset("KITS/TEST CC0 RISERS.XML");
+		if (!r1.ok) {
+			std::fprintf(stderr, "load risers kit preset failed: %s\n", r1.error.c_str());
+			return 1;
+		}
+		for (uint8_t note = 36; note < 40; ++note) {
+			engine.midi({0x90, note, 100});
+		}
+		engine.render(nullptr, static_cast<size_t>(32 * (iter + 1)));
+		auto r2 = engine.loadPreset("SYNTHS/GENERATIVE/GEN Sine Sub.XML");
+		if (!r2.ok) {
+			std::fprintf(stderr, "swap away from risers kit failed: %s\n", r2.error.c_str());
+			return 1;
+		}
+		engine.render(nullptr, 256);
+	}
+	std::fprintf(stderr, "test_engine --test-f7-cluster: PASS (overruns=%llu)\n",
+	             static_cast<unsigned long long>(engine.dmaOverruns()));
+	return engine.dmaOverruns() == 0 ? 0 : 1;
 }
 
 } // namespace
@@ -546,9 +659,16 @@ int main(int argc, char** argv) {
 	else if (argc == 4 && std::strcmp(argv[1], "--load-all-twice") == 0) {
 		status = runLoadAllTwice(argv[2], argv[3]);
 	}
+	else if (argc == 4 && std::strcmp(argv[1], "--test-f7-grainfx") == 0) {
+		status = runF7GrainFxSwapTest(argv[2], argv[3]);
+	}
+	else if (argc == 4 && std::strcmp(argv[1], "--test-f7-cluster") == 0) {
+		status = runF7ClusterLoadingSwapTest(argv[2], argv[3]);
+	}
 	else {
 		std::fprintf(stderr, "usage: test_engine --unit-pure TMP | --unit-engine KIT_CARD TMP | "
-		                     "--test-freeze PACK TMP | --load-all-twice CARD CACHE\n");
+		                     "--test-freeze PACK TMP | --load-all-twice CARD CACHE | "
+		                     "--test-f7-grainfx CARD TMP | --test-f7-cluster CARD TMP\n");
 	}
 	std::fflush(nullptr);
 	std::_Exit(status);

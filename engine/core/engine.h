@@ -110,6 +110,7 @@ public:
 	int32_t voiceCount() const;
 	int32_t peakVoiceCount() const;
 	void resetPeakVoiceCount();
+	size_t stealableBytesUsed() const;
 	std::string loadedPresetPath() const;
 	std::string cardImagePath() const;
 

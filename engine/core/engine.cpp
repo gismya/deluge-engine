@@ -67,6 +67,9 @@ PresetKind resolvePresetKind(std::string_view cardPath, PresetKind kind) {
 	if (kind != PresetKind::Auto) {
 		return kind;
 	}
+	while (!cardPath.empty() && cardPath.front() == '/') {
+		cardPath.remove_prefix(1);
+	}
 	return startsWithCaseInsensitive(cardPath, "KITS/") ? PresetKind::Kit : PresetKind::Synth;
 }
 
@@ -663,6 +666,10 @@ int32_t Engine::peakVoiceCount() const {
 
 void Engine::resetPeakVoiceCount() {
 	impl_->peakVoices = voiceCount();
+}
+
+size_t Engine::stealableBytesUsed() const {
+	return plat::stealableBytesUsed();
 }
 
 std::string Engine::loadedPresetPath() const {

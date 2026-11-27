@@ -345,6 +345,10 @@ bool parseMidiBytes(const uint8_t* data, size_t size, MidiSequence* out, std::st
 	if (tracksParsed == 0) {
 		return fail(errorOut, "MIDI file contains no MTrk chunks");
 	}
+	if (tracksParsed < numTracks) {
+		return fail(errorOut, "MIDI file header declares " + std::to_string(numTracks) + " tracks, found "
+		                          + std::to_string(tracksParsed));
+	}
 
 	std::stable_sort(rawEvents.begin(), rawEvents.end(), [](const RawTickEvent& a, const RawTickEvent& b) {
 		if (a.tick != b.tick) {
@@ -495,9 +499,19 @@ bool parseNotesList(std::string_view spec, MidiSequence* out, std::string* error
 		cursorSeconds = std::max(cursorSeconds, noteEnd);
 	}
 
-	std::stable_sort(events.begin(), events.end(), [](const IndexedEvent& a, const IndexedEvent& b) {
+	auto isNoteOff = [](const IndexedEvent& e) {
+		return !e.bytes.empty()
+		       && ((e.bytes[0] & 0xF0u) == 0x80u
+		           || ((e.bytes[0] & 0xF0u) == 0x90u && e.bytes.size() >= 3 && e.bytes[2] == 0));
+	};
+	std::stable_sort(events.begin(), events.end(), [&](const IndexedEvent& a, const IndexedEvent& b) {
 		if (a.timeSeconds != b.timeSeconds) {
 			return a.timeSeconds < b.timeSeconds;
+		}
+		const bool aOff = isNoteOff(a);
+		const bool bOff = isNoteOff(b);
+		if (aOff != bOff) {
+			return aOff; // note-off before note-on at equal timestamps
 		}
 		return a.order < b.order;
 	});

@@ -190,9 +190,6 @@ int cmdRender(int argc, char** argv) {
 	cfg.cardImagePath = cardImage;
 	cfg.cardCacheDir = cardCacheDir;
 	cfg.pace = pace;
-	cfg.callbacks.onError = [](std::string_view msg) {
-		std::fprintf(stderr, "render error: %.*s\n", static_cast<int>(msg.size()), msg.data());
-	};
 
 	std::string bootErr;
 	if (!engine.boot(cfg, &bootErr)) {
@@ -205,6 +202,12 @@ int cmdRender(int argc, char** argv) {
 		std::fprintf(stderr, "render: %s\n", loaded.error.c_str());
 		return 1;
 	}
+
+	core::Callbacks renderCallbacks;
+	renderCallbacks.onError = [](std::string_view msg) {
+		std::fprintf(stderr, "render error: %.*s\n", static_cast<int>(msg.size()), msg.data());
+	};
+	engine.setCallbacks(std::move(renderCallbacks));
 
 	std::vector<int32_t> audio(totalFrames * core::kChannels);
 	size_t currentFrame = 0;
