@@ -181,14 +181,27 @@ uint16_t readInput(uint8_t, uint8_t) {
 void enableInputBuffer(uint8_t, uint8_t) {
 }
 
-// ---- UART (PIC and DIN MIDI): nothing arrives until MIDI/UDP stand-ins are attached (E7/E8).
+// ---- UART (PIC and DIN MIDI): DIN MIDI bytes injected by the host are consumed by MidiEngine::checkIncomingSerialMidi
+// through uartGetCharWithTiming(TIMING_CAPTURE_ITEM_MIDI, ...).
+constexpr size_t kDinMidiRingSize = 65536; // power of two
+uint8_t gDinMidiRing[kDinMidiRingSize];
+size_t gDinMidiHead = 0;
+size_t gDinMidiTail = 0;
+uint32_t gDinMidiRxTime = 0;
+
 struct UartItem uartItems[NUM_UART_ITEMS];
 uint8_t picTxBuffer[PIC_TX_BUFFER_SIZE];
 char midiTxBuffer[MIDI_TX_BUFFER_SIZE];
 uint8_t uartGetChar(int32_t, char*) {
 	return 0;
 }
-uint32_t* uartGetCharWithTiming(int32_t, char*) {
+uint32_t* uartGetCharWithTiming(int32_t item, char* out) {
+	if (item == TIMING_CAPTURE_ITEM_MIDI && gDinMidiHead != gDinMidiTail) {
+		*out = static_cast<char>(gDinMidiRing[gDinMidiHead & (kDinMidiRingSize - 1)]);
+		++gDinMidiHead;
+		gDinMidiRxTime = getTimerValue(0);
+		return &gDinMidiRxTime;
+	}
 	return nullptr;
 }
 void uartPutCharBack(int32_t) {
@@ -346,6 +359,33 @@ uint64_t dmaFrames() {
 
 uint64_t dmaOverruns() {
 	return gDmaOverruns;
+}
+
+bool injectDinMidi(const uint8_t* bytes, size_t len) {
+	if (len == 0) {
+		return true;
+	}
+	if (bytes == nullptr) {
+		return false;
+	}
+	const size_t used = gDinMidiTail - gDinMidiHead;
+	if (len > kDinMidiRingSize - used) {
+		return false;
+	}
+	for (size_t i = 0; i < len; ++i) {
+		gDinMidiRing[gDinMidiTail & (kDinMidiRingSize - 1)] = bytes[i];
+		++gDinMidiTail;
+	}
+	return true;
+}
+
+size_t pendingDinMidiBytes() {
+	return gDinMidiTail - gDinMidiHead;
+}
+
+void clearDinMidi() {
+	gDinMidiHead = 0;
+	gDinMidiTail = 0;
 }
 
 } // namespace deluge::engine::platform

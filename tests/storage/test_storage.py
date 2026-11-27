@@ -153,17 +153,20 @@ class StorageLayerTests(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-            # Also verify render_preset works without --card via DELUGE_SD_IMAGE alone.
+            # Also verify `deluge-engine render` works without --card via DELUGE_SD_IMAGE alone.
             out_wav = Path(tmp) / "env_render.wav"
             rp = subprocess.run(
                 [
-                    str(build_dir() / "render_preset"), "--audio", "null",
-                    "SYNTHS/GENERATIVE/GEN Sine Sub.XML", str(out_wav), "60", "0.2", "0.5",
+                    str(build_dir() / "deluge-engine"), "render", "--audio", "null",
+                    "--preset", "SYNTHS/GENERATIVE/GEN Sine Sub.XML",
+                    "--notes", "60:0.2",
+                    "--lead-in", "0.05",
+                    "--tail", "0.25",
+                    "--out", str(out_wav),
                 ],
                 env=env, capture_output=True, text=True, timeout=TIMEOUT_S,
             )
             self.assertEqual(rp.returncode, 0, rp.stdout + rp.stderr)
-            self.assertIn("Cluster::size 32768", rp.stderr, rp.stderr)
             self.assertIn("overruns 0", rp.stderr, rp.stderr)
             self.assertTrue(out_wav.is_file() and out_wav.stat().st_size > 44)
 

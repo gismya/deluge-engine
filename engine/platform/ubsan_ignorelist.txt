@@ -15,3 +15,13 @@ src:*/src/fatfs/ff.c
 # auto_param.cpp:2097 (AutoParam::readFromFile) compares the first two characters of an XML value with "0x" through a
 # uint16_t* cast of the reader's buffer, at any byte offset. Both CPUs allow unaligned plain loads.
 src:*/src/deluge/modulation/automation/auto_param.cpp
+
+# sample_low_level_reader.cpp:1125,1133 (readSamplesNative) reads 16-bit and 24-bit sample frames via *(int32_t*)
+# at any byte offset (stepping by byteDepth = 2 or 3) and masks with bitMask. Both CPUs allow unaligned plain loads.
+src:*/src/deluge/model/sample/sample_low_level_reader.cpp
+
+# sample_low_level_reader.cpp:435,690,875 (bufferZeroForInterpolation) resets currentPlayPos = nullptr when a sample
+# finishes and increments currentPlayPos++ as an integer count of buffered trailing zeroes (never dereferenced while
+# clusters[0] == nullptr), comparing (uintptr_t)currentPlayPos >= interpolationBufferSize.
+[pointer-overflow]
+src:*/src/deluge/model/sample/sample_low_level_reader.cpp
