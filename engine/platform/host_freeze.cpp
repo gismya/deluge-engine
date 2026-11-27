@@ -86,7 +86,7 @@ void setFreezeCallback(FreezeCallbackFn cb) {
 	}
 
 	const char* loaded = resolveLoadedContext();
-	char bt[kBacktraceBufSize];
+	static char bt[kBacktraceBufSize];
 	formatBacktrace(bt, sizeof(bt));
 
 	std::fprintf(stderr, "FREEZE_WITH_ERROR %s\nloaded: %s\nvirtual_time: %.6f s\nbacktrace:\n%s", safeCode, loaded,

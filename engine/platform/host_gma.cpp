@@ -95,6 +95,9 @@ void* GeneralMemoryAllocator::alloc(uint32_t requiredSize, bool, bool makeSteala
 	if (size == 0) {
 		size = 4; // getAllocatedSize must stay non-zero (String S002 contract)
 	}
+	if (size > SPACE_SIZE_MASK) {
+		return nullptr;
+	}
 	if (makeStealable) {
 		evictStealablesToFit(*this, size, thingNotToStealFrom);
 	}
@@ -143,12 +146,20 @@ uint32_t GeneralMemoryAllocator::getAllocatedSize(void* address) {
 	return *headerOf(address) & SPACE_SIZE_MASK;
 }
 
-// The allocation keeps its full malloc size; only the recorded size changes. Returns the new size.
+// The allocation keeps its full malloc size; only the recorded size changes. Returns the new size, or oldSize when
+// newSize >= oldSize (matching MemoryRegion::shortenRight). Clamps 0 to 4 to preserve the String S002 contract.
 uint32_t GeneralMemoryAllocator::shortenRight(void* address, uint32_t newSize) {
 	uint32_t* h = headerOf(address);
 	const uint32_t oldSize = *h & SPACE_SIZE_MASK;
-	const uint32_t clampedNew = newSize & SPACE_SIZE_MASK;
-	if ((*h & SPACE_TYPE_MASK) == SPACE_HEADER_STEALABLE && clampedNew < oldSize) {
+	size_t target = (static_cast<size_t>(newSize) + 3u) & ~size_t{3};
+	if (target == 0) {
+		target = 4;
+	}
+	if (target >= oldSize) {
+		return oldSize;
+	}
+	const uint32_t clampedNew = static_cast<uint32_t>(target);
+	if ((*h & SPACE_TYPE_MASK) == SPACE_HEADER_STEALABLE) {
 		const uint32_t diff = oldSize - clampedNew;
 		gStealableBytesUsed = gStealableBytesUsed >= diff ? (gStealableBytesUsed - diff) : 0;
 	}

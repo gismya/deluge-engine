@@ -284,6 +284,20 @@ void testAllocatorF3Contract() {
 	CHECK(gma.getAllocatedSize(z) > 0);
 	gma.deallocExternal(z);
 
+	// Oversized allocation (> SPACE_SIZE_MASK) returns nullptr instead of wrapping the 30-bit header size.
+	CHECK(gma.allocExternal(SPACE_SIZE_MASK + 1u) == nullptr);
+	CHECK(gma.allocExternal(SPACE_SIZE_MASK) == nullptr); // rounds up to SPACE_SIZE_MASK + 1
+
+	// shortenRight returns oldSize when newSize >= oldSize, and clamps 0 to 4.
+	void* sr = gma.allocExternal(64);
+	CHECK(sr != nullptr);
+	CHECK(gma.shortenRight(sr, 64) == 64);
+	CHECK(gma.shortenRight(sr, 128) == 64);
+	CHECK(gma.getAllocatedSize(sr) == 64);
+	CHECK(gma.shortenRight(sr, 0) == 4);
+	CHECK(gma.getAllocatedSize(sr) == 4);
+	gma.deallocExternal(sr);
+
 	// Real firmware String copy exercises both S001 (isNonAudioExternal) and S002 (getAllocatedSize != 0).
 	String a;
 	CHECK(a.set("GEN Sine Sub") == Error::NONE);
