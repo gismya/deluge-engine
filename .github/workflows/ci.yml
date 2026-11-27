@@ -64,3 +64,27 @@ jobs:
           name: check-logs-${{ strategy.job-index }}
           path: build/check/*.log
           retention-days: 7
+
+  gui:
+    name: gui (Flutter macOS)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+      - name: Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+      - name: Check GUI
+        run: python3 tools/check.py --only gui
+      - name: Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs-gui
+          path: build/check/*.log
+          retention-days: 7

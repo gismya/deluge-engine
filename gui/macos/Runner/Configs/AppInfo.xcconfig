@@ -1,0 +1,4 @@
+// Application-level settings for the Runner target.
+PRODUCT_NAME = Deluge Engine
+PRODUCT_BUNDLE_IDENTIFIER = com.gismya.delugeEngine
+PRODUCT_COPYRIGHT = Copyright © 2026 gismya. All rights reserved.
