@@ -174,15 +174,6 @@ set_target_properties(engine_platform PROPERTIES C_STANDARD 23 C_EXTENSIONS ON C
 target_link_libraries(engine_platform PUBLIC firmware)
 target_compile_options(engine_platform PRIVATE ${ENGINE_WARNINGS})
 
-# Until the noteRowId fix (#53, firmware PR #535) is on the pin: these two files read an uninitialised noteRowId,
-# which clang turns into an E380 freeze. Zero-initialising locals does what #535 does. Drop this when the pin moves
-# past #535 (docs/implementation-notes.md).
-set_source_files_properties(
-  "${FW}/src/deluge/model/clip/instrument_clip.cpp"
-  "${FW}/src/deluge/gui/views/instrument_clip_view.cpp"
-  TARGET_DIRECTORY firmware
-  PROPERTIES COMPILE_OPTIONS "-ftrivial-auto-var-init=zero")
-
 # ---- The first render: one preset and one note to a WAV. E4 replaces it with `deluge-engine render`.
 add_executable(render_preset engine/cli/render_preset.cpp)
 set_target_properties(render_preset PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
