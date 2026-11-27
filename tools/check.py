@@ -116,6 +116,8 @@ class Checker:
         run(self.build_command(build_dir), f"{name}-build.log", BUILD_TIMEOUT_S, env=self.env)
         self.check_includes(build_dir)
         env = dict(self.env, DELUGE_ENGINE_BUILD=str(build_dir))
+        run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/platform", "-t", "."],
+            f"{name}-platform.log", TEST_TIMEOUT_S, env=env)
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/smoke", "-t", "."],
             f"{name}-smoke.log", TEST_TIMEOUT_S, env=env)
 

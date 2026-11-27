@@ -8,7 +8,7 @@ against the new text. This stores a hash of each function's text and fails on an
     tools/startup_guard.py            check the firmware against engine/platform/startup_hashes.json
     tools/startup_guard.py --update   after checking the host init list against the new text, store the new hashes
 
-The host init list today: main() in engine/cli/render_preset.cpp (E1). E2 replaces it with the scheduler startup.
+The host init list lives in engine/platform/host_startup.cpp (bootFirmware).
 Seam S5 (splitting deluge_main) removes the list and this guard.
 """
 
@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "firmware/src/deluge/deluge.cpp"
 HASHES = ROOT / "engine/platform/startup_hashes.json"
 FUNCTIONS = ("deluge_main", "registerTasks")
-HOST_INIT = "engine/cli/render_preset.cpp"
+HOST_INIT = "engine/platform/host_startup.cpp"
 
 
 class GuardError(Exception):
