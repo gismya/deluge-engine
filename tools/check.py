@@ -7,7 +7,7 @@
 
 Steps, in order (each has a timeout, and the first failure stops the run):
   guards         the factory-content guard, the protobuf codegen check, the tool tests, the startup text-hash guard
-  asan           configure and build build/asan (ASan + UBSan, -O1), check its includes, run platform, smoke and protocol tests
+  asan           configure and build build/asan (ASan + UBSan, -O1), check its includes, run platform, storage, smoke and protocol tests
   release        the same for build/release (-O2)
   pointer-keys   the firmware's PointerKeyTests (tests/unit/pointer_keys), built natively: 64-bit, which the
                  firmware's own CI never runs (it builds its tests -m32)
@@ -130,6 +130,8 @@ class Checker:
         env = dict(self.env, DELUGE_ENGINE_BUILD=str(build_dir))
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/platform", "-t", "."],
             f"{name}-platform.log", TEST_TIMEOUT_S, env=env)
+        run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/storage", "-t", "."],
+            f"{name}-storage.log", TEST_TIMEOUT_S, env=env)
         run([sys.executable, "-m", "unittest", "discover", "-v", "-s", "tests/smoke", "-t", "."],
             f"{name}-smoke.log", TEST_TIMEOUT_S, env=env)
         run([self.proto_python(), "-m", "unittest", "discover", "-v", "-s", "tests/protocol", "-t", "."],

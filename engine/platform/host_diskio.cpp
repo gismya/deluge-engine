@@ -39,15 +39,15 @@ int gRuntimeFd = -1;
 uint64_t gRuntimeSectorCount = 0;
 BYTE gRuntimeStatus = STA_NOINIT | STA_NODISK;
 std::string gRuntimePath;
-std::unordered_map<uint32_t, SectorData> gWriteOverlay;
+std::unordered_map<uint64_t, SectorData> gWriteOverlay;
 
 // Modelled SD transfer timing (spec §3.6): default 300 us + 40 us/sector.
 double gReadCommandUs = deluge::engine::platform::kDefaultCardReadCommandUs;
 double gReadSectorUs = deluge::engine::platform::kDefaultCardReadSectorUs;
-uint32_t gReadCommandTicks =
-    static_cast<uint32_t>(deluge::engine::platform::kDefaultCardReadCommandUs * DELUGE_CLOCKS_PERf / 1e6);
-uint32_t gReadSectorTicks =
-    static_cast<uint32_t>(deluge::engine::platform::kDefaultCardReadSectorUs * DELUGE_CLOCKS_PERf / 1e6);
+uint64_t gReadCommandTicks =
+    static_cast<uint64_t>(deluge::engine::platform::kDefaultCardReadCommandUs * DELUGE_CLOCKS_PERf / 1e6);
+uint64_t gReadSectorTicks =
+    static_cast<uint64_t>(deluge::engine::platform::kDefaultCardReadSectorUs * DELUGE_CLOCKS_PERf / 1e6);
 uint64_t gCardDoneAtTicks = 0;
 
 deluge::engine::platform::DiskStats gStats{};
@@ -206,7 +206,7 @@ DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, U
 	}
 	if (!gWriteOverlay.empty()) {
 		for (UINT i = 0; i < count; i++) {
-			auto it = gWriteOverlay.find(sector + i);
+			auto it = gWriteOverlay.find(static_cast<uint64_t>(sector) + i);
 			if (it != gWriteOverlay.end()) {
 				std::memcpy(buff + static_cast<size_t>(i) * deluge::engine::platform::kCardSectorBytes,
 				            it->second.data(), deluge::engine::platform::kCardSectorBytes);
@@ -217,15 +217,15 @@ DRESULT disk_read_without_streaming_first(BYTE pdrv, BYTE* buff, DWORD sector, U
 	gStats.readCalls++;
 	gStats.sectorsRead += count;
 
-	const uint64_t waitTicks = static_cast<uint64_t>(gReadCommandTicks)
-	                           + static_cast<uint64_t>(count) * static_cast<uint64_t>(gReadSectorTicks);
+	const uint64_t waitTicks = gReadCommandTicks + static_cast<uint64_t>(count) * gReadSectorTicks;
 	if (waitTicks > 0) {
 		gStats.modeledWaitCalls++;
 		if (sdRoutineLock) {
 			gStats.busyWaitCalls++;
 		}
 		gCardDoneAtTicks = host_virtual_ticks + waitTicks;
-		yieldingRoutineWithTimeoutForSD(cardTransferDone, 1.0);
+		const double timeoutS = (static_cast<double>(waitTicks) / DELUGE_CLOCKS_PERf) * 2.0 + 1.0;
+		yieldingRoutineWithTimeoutForSD(cardTransferDone, timeoutS);
 	}
 
 	currentlyAccessingCard = 0;
@@ -275,7 +275,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count) {
 	currentlyAccessingCard = 1;
 
 	for (UINT i = 0; i < count; i++) {
-		SectorData& slot = gWriteOverlay[static_cast<uint32_t>(sector) + i];
+		SectorData& slot = gWriteOverlay[static_cast<uint64_t>(sector) + i];
 		std::memcpy(slot.data(), buff + static_cast<size_t>(i) * deluge::engine::platform::kCardSectorBytes,
 		            deluge::engine::platform::kCardSectorBytes);
 	}
@@ -368,8 +368,8 @@ uint64_t cardImageSectorCount() {
 void setCardReadTimingUs(double commandUs, double sectorUs) {
 	gReadCommandUs = commandUs > 0.0 ? commandUs : 0.0;
 	gReadSectorUs = sectorUs > 0.0 ? sectorUs : 0.0;
-	gReadCommandTicks = static_cast<uint32_t>(gReadCommandUs * DELUGE_CLOCKS_PERf / 1e6);
-	gReadSectorTicks = static_cast<uint32_t>(gReadSectorUs * DELUGE_CLOCKS_PERf / 1e6);
+	gReadCommandTicks = static_cast<uint64_t>(gReadCommandUs * DELUGE_CLOCKS_PERf / 1e6);
+	gReadSectorTicks = static_cast<uint64_t>(gReadSectorUs * DELUGE_CLOCKS_PERf / 1e6);
 }
 
 double cardReadCommandUs() {
