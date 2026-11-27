@@ -16,10 +16,14 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <poll.h>
 #include <set>
 #include <spawn.h>
 #include <sstream>
 #include <string>
+#if defined(__APPLE__)
+#include <sys/clonefile.h>
+#endif
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -65,6 +69,7 @@ struct FolderScan {
 struct Manifest {
 	std::string source;
 	uint64_t imageBytes = 0;
+	uint64_t imageIno = 0;
 	uint32_t clusterBytes = 0;
 	std::set<std::string> dirs;
 	std::map<std::string, FileEntry> files;
@@ -288,6 +293,7 @@ bool readManifest(const fs::path& manifestPath, Manifest& out) {
 	}
 	bool hasSource = false;
 	bool hasImageBytes = false;
+	bool hasImageIno = false;
 	bool hasClusterBytes = false;
 
 	while (std::getline(in, line)) {
@@ -309,6 +315,16 @@ bool readManifest(const fs::path& manifestPath, Manifest& out) {
 				return false;
 			}
 			hasImageBytes = true;
+			continue;
+		}
+		if (line.rfind("image_ino\t", 0) == 0) {
+			try {
+				out.imageIno = std::stoull(line.substr(10));
+			}
+			catch (...) {
+				return false;
+			}
+			hasImageIno = true;
 			continue;
 		}
 		if (line.rfind("cluster_bytes\t", 0) == 0) {
@@ -353,11 +369,11 @@ bool readManifest(const fs::path& manifestPath, Manifest& out) {
 			return false;
 		}
 	}
-	return hasSource && hasImageBytes && hasClusterBytes;
+	return hasSource && hasImageBytes && hasImageIno && hasClusterBytes;
 }
 
 bool writeManifestAtomic(const fs::path& manifestPath, const std::string& canonicalSource, uint64_t imageBytes,
-                         const FolderScan& scan, std::string& errorOut) {
+                         uint64_t imageIno, const FolderScan& scan, std::string& errorOut) {
 	fs::path tmpPath = manifestPath;
 	tmpPath += ".tmp";
 
@@ -371,6 +387,7 @@ bool writeManifestAtomic(const fs::path& manifestPath, const std::string& canoni
 	oss << kManifestHeader << '\n';
 	oss << "source\t" << percentEncode(canonicalSource) << '\n';
 	oss << "image_bytes\t" << imageBytes << '\n';
+	oss << "image_ino\t" << imageIno << '\n';
 	oss << "cluster_bytes\t" << kCardClusterBytes << '\n';
 	for (const auto& d : scan.dirs) {
 		oss << "D\t0\t0\t" << percentEncode(d) << '\n';
@@ -414,21 +431,32 @@ bool writeManifestAtomic(const fs::path& manifestPath, const std::string& canoni
 	return true;
 }
 
-// Run a subprocess without a shell, capturing combined stdout+stderr.
-int runProcess(const std::vector<std::string>& args, std::string& output) {
-	output.clear();
-	int pipeFds[2];
-	if (::pipe(pipeFds) != 0) {
-		output = std::string("pipe failed: ") + std::strerror(errno);
+// Run a subprocess without a shell, capturing stdout and stderr separately so warnings on stderr never pollute
+// structured stdout parsing (e.g. hdiutil attach device paths).
+int runProcess(const std::vector<std::string>& args, std::string& stdoutOut, std::string& stderrOut) {
+	stdoutOut.clear();
+	stderrOut.clear();
+	int outPipe[2] = {-1, -1};
+	int errPipe[2] = {-1, -1};
+	if (::pipe(outPipe) != 0) {
+		stderrOut = std::string("pipe(stdout) failed: ") + std::strerror(errno);
+		return -1;
+	}
+	if (::pipe(errPipe) != 0) {
+		stderrOut = std::string("pipe(stderr) failed: ") + std::strerror(errno);
+		::close(outPipe[0]);
+		::close(outPipe[1]);
 		return -1;
 	}
 
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
-	posix_spawn_file_actions_addclose(&actions, pipeFds[0]);
-	posix_spawn_file_actions_adddup2(&actions, pipeFds[1], STDOUT_FILENO);
-	posix_spawn_file_actions_adddup2(&actions, pipeFds[1], STDERR_FILENO);
-	posix_spawn_file_actions_addclose(&actions, pipeFds[1]);
+	posix_spawn_file_actions_addclose(&actions, outPipe[0]);
+	posix_spawn_file_actions_addclose(&actions, errPipe[0]);
+	posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
+	posix_spawn_file_actions_adddup2(&actions, errPipe[1], STDERR_FILENO);
+	posix_spawn_file_actions_addclose(&actions, outPipe[1]);
+	posix_spawn_file_actions_addclose(&actions, errPipe[1]);
 
 	std::vector<char*> argv;
 	argv.reserve(args.size() + 1);
@@ -440,29 +468,55 @@ int runProcess(const std::vector<std::string>& args, std::string& output) {
 	pid_t pid = -1;
 	int spawnErr = ::posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
 	posix_spawn_file_actions_destroy(&actions);
-	::close(pipeFds[1]);
+	::close(outPipe[1]);
+	::close(errPipe[1]);
 
 	if (spawnErr != 0) {
-		::close(pipeFds[0]);
-		output = std::string("posix_spawnp(") + args[0] + ") failed: " + std::strerror(spawnErr);
+		::close(outPipe[0]);
+		::close(errPipe[0]);
+		stderrOut = std::string("posix_spawnp(") + args[0] + ") failed: " + std::strerror(spawnErr);
 		return -1;
 	}
 
+	struct pollfd fds[2];
+	fds[0].fd = outPipe[0];
+	fds[0].events = POLLIN;
+	fds[1].fd = errPipe[0];
+	fds[1].events = POLLIN;
+	int openCount = 2;
 	char buf[4096];
-	for (;;) {
-		ssize_t n = ::read(pipeFds[0], buf, sizeof(buf));
-		if (n < 0) {
+
+	while (openCount > 0) {
+		int pr = ::poll(fds, 2, -1);
+		if (pr < 0) {
 			if (errno == EINTR) {
 				continue;
 			}
 			break;
 		}
-		if (n == 0) {
-			break;
+		for (int i = 0; i < 2; i++) {
+			if (fds[i].fd < 0 || fds[i].revents == 0) {
+				continue;
+			}
+			if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+				ssize_t n = ::read(fds[i].fd, buf, sizeof(buf));
+				if (n > 0) {
+					(i == 0 ? stdoutOut : stderrOut).append(buf, static_cast<size_t>(n));
+				}
+				else if (n == 0 || (n < 0 && errno != EINTR)) {
+					::close(fds[i].fd);
+					fds[i].fd = -1;
+					openCount--;
+				}
+			}
 		}
-		output.append(buf, static_cast<size_t>(n));
 	}
-	::close(pipeFds[0]);
+	if (fds[0].fd >= 0) {
+		::close(fds[0].fd);
+	}
+	if (fds[1].fd >= 0) {
+		::close(fds[1].fd);
+	}
 
 	int status = 0;
 	while (::waitpid(pid, &status, 0) < 0) {
@@ -476,61 +530,83 @@ int runProcess(const std::vector<std::string>& args, std::string& output) {
 	return -1;
 }
 
-bool parseHdiutilDevice(const std::string& attachOutput, std::string& deviceOut) {
-	// First token matching /dev/disk<digits>
-	std::istringstream iss(attachOutput);
-	std::string tok;
-	while (iss >> tok) {
-		if (tok.rfind("/dev/disk", 0) == 0 && tok.size() > 9) {
-			bool allDigits = true;
-			for (size_t i = 9; i < tok.size(); i++) {
-				if (!std::isdigit(static_cast<unsigned char>(tok[i]))) {
-					allDigits = false;
-					break;
-				}
-			}
-			if (allDigits) {
-				deviceOut = tok;
-				return true;
-			}
+bool parseHdiutilDevice(const std::string& attachStdout, std::string& deviceOut) {
+	// Parse stdout line by line: accept only a line-leading "/dev/disk<N>" token (followed by whitespace or EOL),
+	// and explicitly refuse /dev/disk0 (the host boot disk).
+	std::istringstream lines(attachStdout);
+	std::string line;
+	while (std::getline(lines, line)) {
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
 		}
+		if (line.rfind("/dev/disk", 0) != 0) {
+			continue;
+		}
+		size_t end = 9;
+		while (end < line.size() && std::isdigit(static_cast<unsigned char>(line[end]))) {
+			end++;
+		}
+		if (end == 9) {
+			continue;
+		}
+		if (end < line.size() && !std::isspace(static_cast<unsigned char>(line[end]))) {
+			continue; // e.g. /dev/disk4s1 partition slice, not whole raw disk
+		}
+		unsigned long diskNum = 0;
+		try {
+			diskNum = std::stoul(line.substr(9, end - 9));
+		}
+		catch (...) {
+			continue;
+		}
+		if (diskNum == 0) {
+			return false; // never format /dev/disk0
+		}
+		deviceOut = line.substr(0, end);
+		return true;
 	}
 	return false;
 }
 
 bool formatViaHdiutilDevice(const fs::path& imagePath, std::string& errorOut) {
 	std::string attachOut;
+	std::string attachErr;
 	int rc = runProcess(
 	    {"/usr/bin/hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", imagePath.string()},
-	    attachOut);
+	    attachOut, attachErr);
 	if (rc != 0) {
-		errorOut = "hdiutil attach failed (exit " + std::to_string(rc) + "): " + attachOut;
+		errorOut = "hdiutil attach failed (exit " + std::to_string(rc) + "): " + attachOut + attachErr;
 		return false;
 	}
 	std::string device;
 	if (!parseHdiutilDevice(attachOut, device)) {
-		errorOut = "hdiutil attach returned no /dev/diskN device: " + attachOut;
+		errorOut = "hdiutil attach returned no safe /dev/diskN device (stdout: " + attachOut
+		           + ", stderr: " + attachErr + ")";
 		return false;
 	}
 	const std::string rawDevice = "/dev/rdisk" + device.substr(9);
 
 	std::string fmtOut;
-	int fmtRc = runProcess({"/sbin/newfs_msdos", "-F", "32", "-c", "64", "-v", "DELUGE", rawDevice}, fmtOut);
+	std::string fmtErr;
+	int fmtRc = runProcess({"/sbin/newfs_msdos", "-F", "32", "-c", "64", "-v", "DELUGE", rawDevice}, fmtOut, fmtErr);
 
 	// Always detach, even when newfs_msdos failed.
 	std::string detachOut;
-	int detachRc = runProcess({"/usr/bin/hdiutil", "detach", device}, detachOut);
+	std::string detachErr;
+	int detachRc = runProcess({"/usr/bin/hdiutil", "detach", device}, detachOut, detachErr);
 	if (detachRc != 0) {
 		std::string forceOut;
-		int forceRc = runProcess({"/usr/bin/hdiutil", "detach", "-force", device}, forceOut);
+		std::string forceErr;
+		int forceRc = runProcess({"/usr/bin/hdiutil", "detach", "-force", device}, forceOut, forceErr);
 		if (forceRc != 0 && fmtRc == 0) {
-			errorOut = "hdiutil detach failed for " + device + ": " + detachOut + " / " + forceOut;
+			errorOut = "hdiutil detach failed for " + device + ": " + detachOut + detachErr + " / " + forceOut
+			           + forceErr;
 			return false;
 		}
 	}
 
 	if (fmtRc != 0) {
-		errorOut = "newfs_msdos on " + rawDevice + " failed (exit " + std::to_string(fmtRc) + "): " + fmtOut;
+		errorOut = "newfs_msdos on " + rawDevice + " failed (exit " + std::to_string(fmtRc) + "): " + fmtOut + fmtErr;
 		return false;
 	}
 	return true;
@@ -557,18 +633,20 @@ bool formatFat32SparseImage(const fs::path& imagePath, uint64_t imageBytes, bool
 
 	const uint64_t sectors = imageBytes / kCardSectorBytes;
 	std::string out;
+	std::string err;
 	int rc = runProcess({"/sbin/newfs_msdos", "-F", "32", "-c", "64", "-S", "512", "-s", std::to_string(sectors),
 	                     "-h", "255", "-u", "63", "-o", "0", "-v", "DELUGE", imagePath.string()},
-	                    out);
+	                    out, err);
 	if (rc == 0) {
 		return true;
 	}
+	const std::string combined = out + err;
 	// macOS 26's newfs_msdos refuses plain files ("Cannot get partition offset"): fall back to hdiutil raw disk.
-	if (out.find("Cannot get partition offset") != std::string::npos
-	    || out.find("Inappropriate ioctl for device") != std::string::npos) {
+	if (combined.find("Cannot get partition offset") != std::string::npos
+	    || combined.find("Inappropriate ioctl for device") != std::string::npos) {
 		return formatViaHdiutilDevice(imagePath, errorOut);
 	}
-	errorOut = "newfs_msdos failed (exit " + std::to_string(rc) + "): " + out;
+	errorOut = "newfs_msdos failed (exit " + std::to_string(rc) + "): " + combined;
 	return false;
 }
 
@@ -726,113 +804,157 @@ bool tryIncrementalRefresh(const fs::path& cardRoot, const std::string& canonica
 		return true;
 	}
 
-	detail::ScopedDirectCardBuild buildScope(imagePath.string());
-	if (!buildScope.isOpen()) {
+	// Never mutate card.img in place: active readers hold card.img open O_RDONLY without build.lock, and an
+	// interrupted refresh must leave the prior card.img and manifest intact. Clone to card.img.tmp (O(1) COW on APFS),
+	// refresh the clone, fsync, then atomically rename over card.img.
+	fs::path tmpImagePath = imagePath;
+	tmpImagePath += ".tmp";
+	auto cleanupTmp = [&]() {
+		std::error_code rmEc;
+		fs::remove(tmpImagePath, rmEc);
+	};
+	cleanupTmp();
+
+#if defined(__APPLE__)
+	if (::clonefile(imagePath.c_str(), tmpImagePath.c_str(), 0) != 0) {
+		// On filesystems without COW cloning (ENOTSUP/EXDEV) or any clone failure, fall back cleanly to a full rebuild.
+		cleanupTmp();
 		outNeedFullRebuild = true;
 		return false;
 	}
+#else
+	outNeedFullRebuild = true;
+	return false;
+#endif
 
-	gBuilderFatFs = {};
-	if (f_mount(&gBuilderFatFs, "", 1) != FR_OK || gBuilderFatFs.fs_type != FS_FAT32
-	    || gBuilderFatFs.csize != kCardClusterSectors) {
-		unmountFatVolume();
-		outNeedFullRebuild = true;
-		return false;
-	}
-
-	// Verify there is enough free space on the existing image for the incoming changes.
-	DWORD freeClusters = 0;
-	FATFS* fsPtr = nullptr;
-	if (f_getfree("", &freeClusters, &fsPtr) != FR_OK) {
-		unmountFatVolume();
-		outNeedFullRebuild = true;
-		return false;
-	}
-	const uint64_t requiredClusters = upsertClusters + static_cast<uint64_t>(addedDirs.size()) * 2 + 64;
-	if (static_cast<uint64_t>(freeClusters) + freedClusters < requiredClusters) {
-		unmountFatVolume();
-		outNeedFullRebuild = true;
-		return false;
-	}
-
-	// Invalidate the manifest before mutating card.img so an interrupted refresh triggers a clean rebuild next time.
-	std::error_code rmEc;
-	fs::remove(manifestPath, rmEc);
-
-	const uint32_t totalWork = static_cast<uint32_t>(removedFiles.size() + upsertFiles.size());
-	uint32_t doneWork = 0;
-	if (onProgress) {
-		onProgress(0, totalWork);
-	}
-
-	// 1. Delete removed files.
-	for (const auto& rel : removedFiles) {
-		FRESULT r = f_unlink(rel.c_str());
-		if (r != FR_OK && r != FR_NO_FILE && r != FR_NO_PATH) {
-			result.error = "f_unlink(" + rel + ") failed: " + fresultName(r);
-			unmountFatVolume();
-			return false;
-		}
-		result.filesRemoved++;
-		doneWork++;
-		if (onProgress) {
-			onProgress(doneWork, totalWork);
-		}
-	}
-
-	// 2. Delete removed directories (deepest-first).
-	for (const auto& rel : removedDirs) {
-		FRESULT r = f_unlink(rel.c_str());
-		if (r == FR_OK) {
-			result.dirsRemoved++;
-		}
-		else if (r != FR_NO_FILE && r != FR_NO_PATH) {
-			// If a directory couldn't be removed cleanly, fall back to a clean full rebuild.
-			unmountFatVolume();
+	{
+		detail::ScopedDirectCardBuild buildScope(tmpImagePath.string());
+		if (!buildScope.isOpen()) {
+			cleanupTmp();
 			outNeedFullRebuild = true;
 			return false;
 		}
-	}
 
-	// 3. Create added directories (shallowest-first).
-	for (const auto& rel : addedDirs) {
-		FRESULT r = f_mkdir(rel.c_str());
-		if (r == FR_OK) {
-			result.dirsCreated++;
-		}
-		else if (r != FR_EXIST) {
-			result.error = "f_mkdir(" + rel + ") failed: " + fresultName(r);
+		gBuilderFatFs = {};
+		if (f_mount(&gBuilderFatFs, "", 1) != FR_OK || gBuilderFatFs.fs_type != FS_FAT32
+		    || gBuilderFatFs.csize != kCardClusterSectors) {
 			unmountFatVolume();
+			cleanupTmp();
+			outNeedFullRebuild = true;
 			return false;
 		}
-	}
 
-	// 4. Write added and modified files.
-	std::vector<uint8_t> copyBuf(kCopyBufferBytes);
-	for (const auto& f : upsertFiles) {
-		bool diskFull = false;
-		if (!copyHostFileToFat(cardRoot / f.relPath, f.relPath, copyBuf, diskFull, result.error)) {
+		// Verify there is enough free space on the existing image for the incoming changes.
+		DWORD freeClusters = 0;
+		FATFS* fsPtr = nullptr;
+		if (f_getfree("", &freeClusters, &fsPtr) != FR_OK) {
 			unmountFatVolume();
-			if (diskFull) {
-				result.error.clear();
-				outNeedFullRebuild = true;
-			}
+			cleanupTmp();
+			outNeedFullRebuild = true;
 			return false;
 		}
-		result.filesWritten++;
-		doneWork++;
+		const uint64_t requiredClusters = upsertClusters + static_cast<uint64_t>(addedDirs.size()) * 2 + 64;
+		if (static_cast<uint64_t>(freeClusters) + freedClusters < requiredClusters) {
+			unmountFatVolume();
+			cleanupTmp();
+			outNeedFullRebuild = true;
+			return false;
+		}
+
+		const uint32_t totalWork = static_cast<uint32_t>(removedFiles.size() + upsertFiles.size());
+		uint32_t doneWork = 0;
 		if (onProgress) {
-			onProgress(doneWork, totalWork);
+			onProgress(0, totalWork);
+		}
+
+		// 1. Delete removed files.
+		for (const auto& rel : removedFiles) {
+			FRESULT r = f_unlink(rel.c_str());
+			if (r != FR_OK && r != FR_NO_FILE && r != FR_NO_PATH) {
+				result.error = "f_unlink(" + rel + ") failed: " + fresultName(r);
+				unmountFatVolume();
+				cleanupTmp();
+				return false;
+			}
+			result.filesRemoved++;
+			doneWork++;
+			if (onProgress) {
+				onProgress(doneWork, totalWork);
+			}
+		}
+
+		// 2. Delete removed directories (deepest-first).
+		for (const auto& rel : removedDirs) {
+			FRESULT r = f_unlink(rel.c_str());
+			if (r == FR_OK) {
+				result.dirsRemoved++;
+			}
+			else if (r != FR_NO_FILE && r != FR_NO_PATH) {
+				// If a directory couldn't be removed cleanly, fall back to a clean full rebuild.
+				unmountFatVolume();
+				cleanupTmp();
+				outNeedFullRebuild = true;
+				return false;
+			}
+		}
+
+		// 3. Create added directories (shallowest-first).
+		for (const auto& rel : addedDirs) {
+			FRESULT r = f_mkdir(rel.c_str());
+			if (r == FR_OK) {
+				result.dirsCreated++;
+			}
+			else if (r != FR_EXIST) {
+				result.error = "f_mkdir(" + rel + ") failed: " + fresultName(r);
+				unmountFatVolume();
+				cleanupTmp();
+				return false;
+			}
+		}
+
+		// 4. Write added and modified files.
+		std::vector<uint8_t> copyBuf(kCopyBufferBytes);
+		for (const auto& f : upsertFiles) {
+			bool diskFull = false;
+			if (!copyHostFileToFat(cardRoot / f.relPath, f.relPath, copyBuf, diskFull, result.error)) {
+				unmountFatVolume();
+				cleanupTmp();
+				if (diskFull) {
+					result.error.clear();
+					outNeedFullRebuild = true;
+				}
+				return false;
+			}
+			result.filesWritten++;
+			doneWork++;
+			if (onProgress) {
+				onProgress(doneWork, totalWork);
+			}
+		}
+
+		unmountFatVolume();
+		if (!buildScope.sync()) {
+			result.error = buildScope.error();
+			cleanupTmp();
+			return false;
 		}
 	}
 
-	unmountFatVolume();
-	if (!buildScope.sync()) {
-		result.error = buildScope.error();
+	std::error_code renEc;
+	fs::rename(tmpImagePath, imagePath, renEc);
+	if (renEc) {
+		result.error = "failed renaming refreshed card image: " + renEc.message();
+		cleanupTmp();
 		return false;
 	}
 
-	if (!writeManifestAtomic(manifestPath, canonicalSource, oldManifest.imageBytes, scan, result.error)) {
+	struct stat newImgSt {};
+	if (::stat(imagePath.c_str(), &newImgSt) != 0) {
+		result.error = "stat after refresh rename failed: " + std::string(std::strerror(errno));
+		return false;
+	}
+	if (!writeManifestAtomic(manifestPath, canonicalSource, oldManifest.imageBytes,
+	                         static_cast<uint64_t>(newImgSt.st_ino), scan, result.error)) {
 		return false;
 	}
 
@@ -875,6 +997,7 @@ bool doFullRebuild(const fs::path& cardRoot, const std::string& canonicalSource,
 		FRESULT mres = f_mount(&gBuilderFatFs, "", 1);
 		if (mres != FR_OK) {
 			result.error = "f_mount on freshly formatted image failed: " + fresultName(mres);
+			unmountFatVolume();
 			cleanupTmp();
 			return false;
 		}
@@ -934,7 +1057,13 @@ bool doFullRebuild(const fs::path& cardRoot, const std::string& canonicalSource,
 		return false;
 	}
 
-	if (!writeManifestAtomic(manifestPath, canonicalSource, imageBytes, scan, result.error)) {
+	struct stat newImgSt {};
+	if (::stat(imagePath.c_str(), &newImgSt) != 0) {
+		result.error = "stat after rebuild rename failed: " + std::string(std::strerror(errno));
+		return false;
+	}
+	if (!writeManifestAtomic(manifestPath, canonicalSource, imageBytes, static_cast<uint64_t>(newImgSt.st_ino), scan,
+	                         result.error)) {
 		return false;
 	}
 
@@ -968,11 +1097,6 @@ CardImageResult buildOrRefreshCardImage(const std::string& cardFolder, const Car
 	}
 	const std::string canonicalSource = rootPath.string();
 
-	FolderScan scan;
-	if (!scanFolder(rootPath, scan, result.error)) {
-		return result;
-	}
-
 	const fs::path cacheRoot = options.cacheDir.empty() ? fs::path(defaultCardCacheDir()) : fs::path(options.cacheDir);
 	const std::string entryName = sanitizeName(rootPath.filename().string()) + "-" + hashStringHex16(canonicalSource);
 	const fs::path entryDir = cacheRoot / entryName;
@@ -989,6 +1113,12 @@ CardImageResult buildOrRefreshCardImage(const std::string& cardFolder, const Car
 		return result;
 	}
 
+	// Scan inside build.lock so a process that waited on the lock never diffs a stale scan against a newer manifest.
+	FolderScan scan;
+	if (!scanFolder(rootPath, scan, result.error)) {
+		return result;
+	}
+
 	const fs::path imagePath = entryDir / "card.img";
 	const fs::path manifestPath = entryDir / "manifest.tsv";
 
@@ -998,7 +1128,8 @@ CardImageResult buildOrRefreshCardImage(const std::string& cardFolder, const Car
 		struct stat imgSt {};
 		if (readManifest(manifestPath, oldManifest) && oldManifest.source == canonicalSource
 		    && oldManifest.clusterBytes == kCardClusterBytes && ::stat(imagePath.c_str(), &imgSt) == 0
-		    && static_cast<uint64_t>(imgSt.st_size) == oldManifest.imageBytes) {
+		    && static_cast<uint64_t>(imgSt.st_size) == oldManifest.imageBytes
+		    && static_cast<uint64_t>(imgSt.st_ino) == oldManifest.imageIno) {
 			bool needFullRebuild = false;
 			if (tryIncrementalRefresh(rootPath, canonicalSource, imagePath, manifestPath, oldManifest, scan,
 			                          options.onProgress, needFullRebuild, result)) {

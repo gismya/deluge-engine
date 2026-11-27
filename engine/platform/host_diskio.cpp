@@ -35,9 +35,11 @@ namespace {
 using SectorData = std::array<uint8_t, deluge::engine::platform::kCardSectorBytes>;
 
 // Runtime (read-only image + in-memory write overlay + read-time model).
+// Start at STA_NOINIT (not STA_NODISK), matching firmware/src/RZA1/diskio.c:91, so StorageManager::initSD() proceeds
+// to mount -> disk_initialize(), allowing the DELUGE_SD_IMAGE environment fallback to open lazily.
 int gRuntimeFd = -1;
 uint64_t gRuntimeSectorCount = 0;
-BYTE gRuntimeStatus = STA_NOINIT | STA_NODISK;
+BYTE gRuntimeStatus = STA_NOINIT;
 std::string gRuntimePath;
 std::unordered_map<uint64_t, SectorData> gWriteOverlay;
 
@@ -123,7 +125,7 @@ void closeRuntimeLocked() {
 	gRuntimeSectorCount = 0;
 	gRuntimePath.clear();
 	gWriteOverlay.clear();
-	gRuntimeStatus = STA_NOINIT | STA_NODISK;
+	gRuntimeStatus = STA_NOINIT;
 }
 
 } // namespace
@@ -338,6 +340,7 @@ bool openCardImage(const std::string& imagePath) {
 	int fd = -1;
 	uint64_t sectors = 0;
 	if (!openRegularImageFd(imagePath, O_RDONLY, fd, sectors)) {
+		gRuntimeStatus = STA_NOINIT | STA_NODISK;
 		return false;
 	}
 	gRuntimeFd = fd;

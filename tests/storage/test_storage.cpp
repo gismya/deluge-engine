@@ -154,13 +154,34 @@ uint64_t hashSparseFile(const std::string& path, uint64_t* outSize = nullptr) {
 	return h;
 }
 
-// ---- Test 1: Incremental builder (build on worker thread, cache hit, edit, add, delete, dir delete)
+std::string makePattern(size_t len, uint8_t seed) {
+	std::string out(len, '\0');
+	for (size_t i = 0; i < len; i++) {
+		out[i] = static_cast<char>((i * 31u + seed) & 0xFFu);
+	}
+	return out;
+}
+
+// ---- Test 1: Incremental builder (build on worker thread, cache hit, edit, add, delete, dir delete,
+// rename, long file names, empty files, 32767/32768/32769 cluster boundaries, COW inode replacement)
 void testIncrementalBuilder(const fs::path& tempDir) {
 	fs::path cardDir = tempDir / "inc_card";
 	fs::path cacheDir = tempDir / "inc_cache";
 
+	const std::string lfnPath =
+	    "SYNTHS/A Very Long Preset Name With Spaces And Punctuation (Rev 2) - 0123456789abcdefghijklmnopqrstuvwxyz.XML";
+	const std::string pat32767 = makePattern(32767, 1);
+	const std::string pat32768 = makePattern(32768, 2);
+	const std::string pat32769 = makePattern(32769, 3);
+
 	CHECK(writeHostFile(cardDir / "SYNTHS/A.XML", "<sound>alpha-v1</sound>\n"));
 	CHECK(writeHostFile(cardDir / "SYNTHS/B.XML", "<sound>beta-v1</sound>\n"));
+	CHECK(writeHostFile(cardDir / "SYNTHS/OLD_NAME.XML", "<sound>will-rename</sound>\n"));
+	CHECK(writeHostFile(cardDir / lfnPath, "<sound>long-filename</sound>\n"));
+	CHECK(writeHostFile(cardDir / "SYNTHS/EMPTY.XML", ""));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32767.BIN", pat32767));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32768.BIN", pat32768));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32769.BIN", pat32769));
 	CHECK(writeHostFile(cardDir / "SAMPLES/SUB/ONE.WAV", std::string(40000, 'X'))); // > 1 cluster (32 KiB)
 	CHECK(writeHostFile(cardDir / ".DS_Store", "ignored-macos-junk"));
 	CHECK(writeHostFile(cardDir / "SYNTHS/._A.XML", "ignored-appledouble"));
@@ -182,12 +203,15 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 	}
 	CHECK(r1.fullRebuild);
 	CHECK(r1.clusterBytes == plat::kCardClusterBytes);
-	CHECK(r1.filesWritten == 3);
+	CHECK(r1.filesWritten == 9);
 	CHECK(r1.filesRemoved == 0);
-	CHECK(r1.totalFiles == 3);
+	CHECK(r1.totalFiles == 9);
 	CHECK(!progress.empty());
-	CHECK(progress.front().first == 0 && progress.front().second == 3);
-	CHECK(progress.back().first == 3 && progress.back().second == 3);
+	CHECK(progress.front().first == 0 && progress.front().second == 9);
+	CHECK(progress.back().first == 9 && progress.back().second == 9);
+
+	struct stat imgStatBefore {};
+	CHECK(::stat(r1.imagePath.c_str(), &imgStatBefore) == 0);
 
 	// Mount read-only with FatFS directly (timing off for quick check) and verify contents.
 	plat::setCardReadTimingUs(0.0, 0.0);
@@ -200,6 +224,12 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 		std::string s;
 		CHECK(readFatFile("SYNTHS/A.XML", s) && s == "<sound>alpha-v1</sound>\n");
 		CHECK(readFatFile("SYNTHS/B.XML", s) && s == "<sound>beta-v1</sound>\n");
+		CHECK(readFatFile("SYNTHS/OLD_NAME.XML", s) && s == "<sound>will-rename</sound>\n");
+		CHECK(readFatFile(lfnPath.c_str(), s) && s == "<sound>long-filename</sound>\n");
+		CHECK(readFatFile("SYNTHS/EMPTY.XML", s) && s.empty());
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32767.BIN", s) && s == pat32767);
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32768.BIN", s) && s == pat32768);
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32769.BIN", s) && s == pat32769);
 		CHECK(readFatFile("SAMPLES/SUB/ONE.WAV", s) && s.size() == 40000 && s[0] == 'X' && s.back() == 'X');
 		CHECK(!fatFileExists(".DS_Store"));
 		CHECK(!fatFileExists("SYNTHS/._A.XML"));
@@ -207,7 +237,7 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 	}
 	plat::closeCardImage();
 
-	// Second build with no changes -> cache hit, no rebuild, 0 files written.
+	// Second build with no changes -> cache hit, no rebuild, 0 files written, same inode.
 	progress.clear();
 	plat::CardImageResult r2 = plat::buildOrRefreshCardImage(cardDir.string(), opts);
 	CHECK(r2.ok);
@@ -215,14 +245,23 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 	CHECK(r2.filesWritten == 0);
 	CHECK(r2.filesRemoved == 0);
 	CHECK(r2.imagePath == r1.imagePath);
+	struct stat imgStatHit {};
+	CHECK(::stat(r2.imagePath.c_str(), &imgStatHit) == 0 && imgStatHit.st_ino == imgStatBefore.st_ino);
 
-	// Modify A.XML (ensure mtime advances even on coarse filesystems by sleeping 5ms + changing size).
+	// Modify A.XML, rename OLD_NAME.XML -> RENAMED_NAME.XML, grow empty file, shrink 32768 -> 0,
+	// swap 32767 <-> 32769 sizes, add KITS/NEW_KIT.XML, delete SAMPLES/SUB/ONE.WAV and SAMPLES/SUB.
 	std::this_thread::sleep_for(std::chrono::milliseconds(5));
-	CHECK(writeHostFile(cardDir / "SYNTHS/A.XML", "<sound>alpha-v2-updated</sound>\n"));
-	// Add a new file in a new directory.
-	CHECK(writeHostFile(cardDir / "KITS/NEW_KIT.XML", "<kit>hello</kit>\n"));
-	// Delete SAMPLES/SUB/ONE.WAV and its now-empty directory SAMPLES/SUB.
 	std::error_code ec;
+	const std::string pat32769b = makePattern(32769, 11);
+	const std::string pat32768b = makePattern(32768, 12);
+	CHECK(writeHostFile(cardDir / "SYNTHS/A.XML", "<sound>alpha-v2-updated</sound>\n"));
+	fs::rename(cardDir / "SYNTHS/OLD_NAME.XML", cardDir / "SYNTHS/RENAMED_NAME.XML", ec);
+	CHECK(!ec);
+	CHECK(writeHostFile(cardDir / "SYNTHS/EMPTY.XML", "<sound>no-longer-empty</sound>\n"));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32768.BIN", ""));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32767.BIN", pat32769b));
+	CHECK(writeHostFile(cardDir / "SAMPLES/BOUNDARY_32769.BIN", pat32768b));
+	CHECK(writeHostFile(cardDir / "KITS/NEW_KIT.XML", "<kit>hello</kit>\n"));
 	fs::remove(cardDir / "SAMPLES/SUB/ONE.WAV", ec);
 	fs::remove(cardDir / "SAMPLES/SUB", ec);
 
@@ -233,12 +272,17 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 		std::fprintf(stderr, "incremental refresh failed: %s\n", r3.error.c_str());
 		return;
 	}
-	CHECK(!r3.fullRebuild); // MUST be incremental, not a full rebuild!
-	CHECK(r3.filesWritten == 2); // A.XML updated + NEW_KIT.XML added
-	CHECK(r3.filesRemoved == 1); // ONE.WAV deleted
+	CHECK(!r3.fullRebuild); // MUST be incremental (via COW clone), not a full rebuild!
+	CHECK(r3.filesWritten == 7); // A, RENAMED_NAME, EMPTY, 32767, 32768, 32769, NEW_KIT
+	CHECK(r3.filesRemoved == 2); // OLD_NAME, ONE.WAV
 	CHECK(r3.dirsRemoved >= 1);  // SAMPLES/SUB removed
-	CHECK(r3.totalFiles == 3);   // A.XML, B.XML, NEW_KIT.XML
-	CHECK(!progress.empty() && progress.back().first == 3 && progress.back().second == 3);
+	CHECK(r3.totalFiles == 9);
+	CHECK(!progress.empty() && progress.back().first == 9 && progress.back().second == 9);
+
+	// Incremental refresh must replace card.img via COW clone + atomic rename (new inode, never mutated in place).
+	struct stat imgStatAfter {};
+	CHECK(::stat(r3.imagePath.c_str(), &imgStatAfter) == 0);
+	CHECK(imgStatAfter.st_ino != imgStatBefore.st_ino);
 
 	// Verify refreshed image contents.
 	CHECK(plat::openCardImage(r3.imagePath));
@@ -248,6 +292,13 @@ void testIncrementalBuilder(const fs::path& tempDir) {
 		std::string s;
 		CHECK(readFatFile("SYNTHS/A.XML", s) && s == "<sound>alpha-v2-updated</sound>\n");
 		CHECK(readFatFile("SYNTHS/B.XML", s) && s == "<sound>beta-v1</sound>\n");
+		CHECK(!fatFileExists("SYNTHS/OLD_NAME.XML"));
+		CHECK(readFatFile("SYNTHS/RENAMED_NAME.XML", s) && s == "<sound>will-rename</sound>\n");
+		CHECK(readFatFile(lfnPath.c_str(), s) && s == "<sound>long-filename</sound>\n");
+		CHECK(readFatFile("SYNTHS/EMPTY.XML", s) && s == "<sound>no-longer-empty</sound>\n");
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32768.BIN", s) && s.empty());
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32767.BIN", s) && s == pat32769b);
+		CHECK(readFatFile("SAMPLES/BOUNDARY_32769.BIN", s) && s == pat32768b);
 		CHECK(readFatFile("KITS/NEW_KIT.XML", s) && s == "<kit>hello</kit>\n");
 		CHECK(!fatFileExists("SAMPLES/SUB/ONE.WAV"));
 		CHECK(!fatFileExists("SAMPLES/SUB"));
@@ -497,6 +548,8 @@ int runVerifyDiskClean(const char* imagePath) {
 	}
 	FATFS fsObj;
 	if (f_mount(&fsObj, "", 1) != FR_OK) {
+		f_mount(nullptr, "", 1);
+		plat::closeCardImage();
 		std::fprintf(stderr, "verify-disk-clean: f_mount failed\n");
 		return 1;
 	}
@@ -508,6 +561,130 @@ int runVerifyDiskClean(const char* imagePath) {
 		return 1;
 	}
 	return 0;
+}
+
+int runHoldReader(const char* imagePath) {
+	// Holds the old card.img inode open across an external incremental refresh and verifies zero tearing.
+	plat::setCardReadTimingUs(0.0, 0.0);
+	if (!plat::openCardImage(imagePath)) {
+		std::fprintf(stderr, "hold-reader: failed to open %s\n", imagePath);
+		return 1;
+	}
+	FATFS fsObj;
+	if (f_mount(&fsObj, "", 1) != FR_OK) {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "hold-reader: f_mount failed\n");
+		return 1;
+	}
+	const std::string expectedBig(131072, '1');
+	std::string a1, big1;
+	if (!readFatFile("SYNTHS/A.XML", a1) || a1 != "version-1\n" || !readFatFile("SAMPLES/BIG.BIN", big1)
+	    || big1 != expectedBig) {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "hold-reader: initial read mismatch\n");
+		return 1;
+	}
+	std::fprintf(stdout, "READY\n");
+	std::fflush(stdout);
+
+	// Block until parent signals that the concurrent refresh has completed.
+	char lineBuf[64];
+	(void)std::fgets(lineBuf, sizeof(lineBuf), stdin);
+
+	std::string a2, big2;
+	if (!readFatFile("SYNTHS/A.XML", a2) || a2 != "version-1\n") {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "hold-reader: A.XML tore or changed on open inode: '%s'\n", a2.c_str());
+		return 1;
+	}
+	if (!readFatFile("SAMPLES/BIG.BIN", big2) || big2 != expectedBig) {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "hold-reader: BIG.BIN tore on open inode (size=%zu)\n", big2.size());
+		return 1;
+	}
+	if (fatFileExists("SYNTHS/C.XML")) {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "hold-reader: unexpectedly saw newly added SYNTHS/C.XML on old inode\n");
+		return 1;
+	}
+	f_mount(nullptr, "", 1);
+	plat::closeCardImage();
+	return 0;
+}
+
+int runVerifyRefreshed(const char* imagePath) {
+	plat::setCardReadTimingUs(0.0, 0.0);
+	if (!plat::openCardImage(imagePath)) {
+		std::fprintf(stderr, "verify-refreshed: failed to open %s\n", imagePath);
+		return 1;
+	}
+	FATFS fsObj;
+	if (f_mount(&fsObj, "", 1) != FR_OK) {
+		f_mount(nullptr, "", 1);
+		std::fprintf(stderr, "verify-refreshed: f_mount failed\n");
+		return 1;
+	}
+	const std::string expectedBig(131072, '2');
+	std::string a, big, c;
+	bool ok = readFatFile("SYNTHS/A.XML", a) && a == "version-2-refreshed\n" && readFatFile("SAMPLES/BIG.BIN", big)
+	          && big == expectedBig && readFatFile("SYNTHS/C.XML", c) && c == "added\n";
+	f_mount(nullptr, "", 1);
+	plat::closeCardImage();
+	if (!ok) {
+		std::fprintf(stderr, "verify-refreshed: content mismatch (a='%s', big_size=%zu, c='%s')\n", a.c_str(),
+		             big.size(), c.c_str());
+		return 1;
+	}
+	return 0;
+}
+
+int runDelugeSdImageFallback() {
+	// Deliberately do NOT call plat::openCardImage(): rely solely on DELUGE_SD_IMAGE + StorageManager::initSD().
+	plat::resetClock();
+	plat::setPace(0.0);
+	plat::bootFirmware();
+	if (Cluster::size != plat::kCardClusterBytes) {
+		std::fprintf(stderr, "deluge-sd-image: unexpected Cluster::size %zu\n", Cluster::size);
+		return 1;
+	}
+	const char* synthPath = "SYNTHS/GENERATIVE/GEN Sine Sub.XML";
+	FilePointer fp;
+	if (!StorageManager::fileExists(synthPath, &fp)) {
+		std::fprintf(stderr, "deluge-sd-image: preset not found via DELUGE_SD_IMAGE: %s\n", synthPath);
+		return 1;
+	}
+	String name;
+	String dir;
+	name.set("GEN Sine Sub.XML");
+	dir.set("SYNTHS/GENERATIVE");
+	Instrument* inst = nullptr;
+	Error err =
+	    StorageManager::loadInstrumentFromFile(currentSong, nullptr, OutputType::SYNTH, true, &inst, &fp, &name, &dir);
+	if (err != Error::NONE || inst == nullptr) {
+		std::fprintf(stderr, "deluge-sd-image: loadInstrumentFromFile failed: %d\n", static_cast<int>(err));
+		return 1;
+	}
+	return 0;
+}
+
+int runFreezeNested(const char* imagePath, bool writeOp) {
+	if (!plat::openCardImage(imagePath)) {
+		std::fprintf(stderr, "freeze-nested: failed to open %s\n", imagePath);
+		return 1;
+	}
+	if (disk_initialize(0) != 0) {
+		std::fprintf(stderr, "freeze-nested: disk_initialize failed\n");
+		return 1;
+	}
+	uint8_t buf[512] = {};
+	currentlyAccessingCard = 1;
+	if (writeOp) {
+		disk_write(0, buf, 0, 1); // expected to freeze E258 and _Exit(70)
+	}
+	else {
+		disk_read_without_streaming_first(0, buf, 0, 1); // expected to freeze E259 and _Exit(70)
+	}
+	return 1;
 }
 
 int runBuildOnly(const char* cardDir, const char* cacheDir) {
@@ -535,6 +712,11 @@ int main(int argc, char** argv) {
 		             "usage: test_storage --unit <pack_dir> <temp_dir> | "
 		             "--concurrent-reader <img_path> <tag> | "
 		             "--verify-disk-clean <img_path> | "
+		             "--hold-reader <img_path> | "
+		             "--verify-refreshed <img_path> | "
+		             "--deluge-sd-image | "
+		             "--freeze-e259 <img_path> | "
+		             "--freeze-e258 <img_path> | "
 		             "--build-only <card_dir> <cache_dir>\n");
 		std::_Exit(2);
 	}
@@ -556,6 +738,31 @@ int main(int argc, char** argv) {
 	}
 	if (std::strcmp(mode, "--verify-disk-clean") == 0 && argc >= 3) {
 		int status = runVerifyDiskClean(argv[2]);
+		std::fflush(nullptr);
+		std::_Exit(status);
+	}
+	if (std::strcmp(mode, "--hold-reader") == 0 && argc >= 3) {
+		int status = runHoldReader(argv[2]);
+		std::fflush(nullptr);
+		std::_Exit(status);
+	}
+	if (std::strcmp(mode, "--verify-refreshed") == 0 && argc >= 3) {
+		int status = runVerifyRefreshed(argv[2]);
+		std::fflush(nullptr);
+		std::_Exit(status);
+	}
+	if (std::strcmp(mode, "--deluge-sd-image") == 0) {
+		int status = runDelugeSdImageFallback();
+		std::fflush(nullptr);
+		std::_Exit(status);
+	}
+	if (std::strcmp(mode, "--freeze-e259") == 0 && argc >= 3) {
+		int status = runFreezeNested(argv[2], false);
+		std::fflush(nullptr);
+		std::_Exit(status);
+	}
+	if (std::strcmp(mode, "--freeze-e258") == 0 && argc >= 3) {
+		int status = runFreezeNested(argv[2], true);
 		std::fflush(nullptr);
 		std::_Exit(status);
 	}
