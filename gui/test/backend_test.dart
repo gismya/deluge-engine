@@ -225,6 +225,7 @@ void main() {
       addTearDown(server.close);
 
       final backend = EngineBackend(
+        audioBackend: 'null',
         socketPathOverride: sockPath,
         spawnProcess: false,
         heartbeatTimeout: const Duration(seconds: 5),
@@ -235,11 +236,16 @@ void main() {
       final sub = backend.events.listen(events.add);
       addTearDown(sub.cancel);
 
-      await backend.start();
+      // Calling start() twice concurrently must open only one session.
+      await Future.wait([backend.start(), backend.start()]);
+      expect(server.connectionCount, 1);
       expect(backend.status, BackendStatus.running);
       expect(backend.hello?.engineVersion, 'test-1.0');
       expect(backend.hasCapability('pieces'), isTrue);
       expect(backend.hasCapability('play_live'), isFalse);
+      // Hello must be emitted strictly before any following frame in the same chunk.
+      expect(events, isNotEmpty);
+      expect(events.first.whichKind(), pb.FromEngine_Kind.hello);
 
       await backend.send(pb.ToEngine(setCard: pb.SetCard(folder: '/cards/a')));
 
@@ -266,34 +272,48 @@ void main() {
       expect(backend.status, BackendStatus.stopped);
     });
 
-    test('fails with versionMismatch and does not restart on wrong version',
+    test(
+        'fails with versionMismatch without emitting trailing frames and does not restart',
         () async {
       final sockPath = p.join(tempDir.path, 'mismatch.sock');
       final server = _FakeUnixEngineServer(sockPath, (client, incoming) async {
-        _FakeUnixEngineServer.send(
-          client,
-          pb.FromEngine(
-            hello: pb.Hello(
-              protocolVersion: 99,
-              engineVersion: 'future-99',
+        // Send mismatched Hello + Heartbeat in a single coalesced write.
+        final coalesced = Uint8List.fromList([
+          ...encodeFrame(
+            pb.FromEngine(
+              hello: pb.Hello(
+                protocolVersion: 99,
+                engineVersion: 'future-99',
+              ),
             ),
           ),
-        );
+          ...encodeFrame(
+            pb.FromEngine(heartbeat: pb.Heartbeat(voices: 3)),
+          ),
+        ]);
+        client.add(coalesced);
       });
       await server.start();
       addTearDown(server.close);
 
       final backend = EngineBackend(
+        audioBackend: 'null',
         socketPathOverride: sockPath,
         spawnProcess: false,
         heartbeatTimeout: const Duration(seconds: 5),
       );
       addTearDown(backend.dispose);
 
+      final events = <pb.FromEngine>[];
+      final sub = backend.events.listen(events.add);
+      addTearDown(sub.cancel);
+
       await backend.start();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
       expect(backend.status, BackendStatus.versionMismatch);
       expect(backend.versionMismatchMessage, contains('99'));
       expect(server.connectionCount, 1);
+      expect(events, isEmpty);
     });
 
     test('restarts on Freeze and stops after 3 freezes within a minute',
@@ -319,6 +339,7 @@ void main() {
       addTearDown(server.close);
 
       final backend = EngineBackend(
+        audioBackend: 'null',
         socketPathOverride: sockPath,
         spawnProcess: false,
         heartbeatTimeout: const Duration(seconds: 10),
@@ -391,6 +412,7 @@ void main() {
       addTearDown(server.close);
 
       final backend = EngineBackend(
+        audioBackend: 'null',
         socketPathOverride: sockPath,
         spawnProcess: false,
         heartbeatTimeout: const Duration(milliseconds: 80),
@@ -408,6 +430,7 @@ void main() {
     test('fails promptly when spawned binary exits before accepting', () async {
       final backend = EngineBackend(
         executablePath: '/usr/bin/false',
+        audioBackend: 'null',
         connectTimeout: const Duration(seconds: 5),
       );
       addTearDown(backend.dispose);
@@ -419,6 +442,114 @@ void main() {
       expect(backend.status, BackendStatus.error);
       expect(backend.errorMessage, contains('exited early'));
       expect(sw.elapsedMilliseconds, lessThan(2000));
+    });
+
+    test('escalates SIGTERM to SIGKILL on HANG/dispose with no orphan child',
+        () async {
+      // Executable script that ignores SIGTERM and never binds the socket.
+      final script = File(p.join(tempDir.path, 'ignore_term.sh'));
+      script.writeAsStringSync('#!/bin/sh\ntrap "" TERM\nexec sleep 60\n');
+      Process.runSync('chmod', ['+x', script.path]);
+
+      final backend = EngineBackend(
+        executablePath: script.path,
+        audioBackend: 'null',
+        connectTimeout: const Duration(seconds: 5),
+        killTermTimeout: const Duration(milliseconds: 100),
+      );
+
+      // Start connecting in the background; dispose while child is alive.
+      final startFuture = backend.start();
+      int? childPid;
+      for (var i = 0; i < 50; i++) {
+        childPid = backend.activeProcessPid;
+        if (childPid != null) break;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(childPid, isNotNull);
+
+      await backend.dispose();
+      await startFuture;
+
+      // Verify child PID no longer exists (`kill -0` returns non-zero).
+      final alive = Process.runSync('kill', ['-0', '$childPid']).exitCode == 0;
+      expect(alive, isFalse);
+    });
+
+    test('escalates SIGTERM to SIGKILL on HANG for a connected hung child',
+        () async {
+      final sockPath = p.join(tempDir.path, 'hung_child.sock');
+      final helloFrame = encodeFrame(
+        pb.FromEngine(
+          hello: pb.Hello(
+            protocolVersion: pb.ProtocolVersion.PROTOCOL_VERSION_CURRENT.value,
+            engineVersion: 'hung-test',
+          ),
+        ),
+      );
+      final hexFrame = helloFrame
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // Python child that ignores SIGTERM, accepts on --socket, sends Hello,
+      // and then hangs forever without sending Heartbeat.
+      final script = File(p.join(tempDir.path, 'hung_engine.py'));
+      script.writeAsStringSync('''#!/usr/bin/env python3
+import os, signal, socket, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+sock_path = sys.argv[sys.argv.index("--socket") + 1]
+if os.path.exists(sock_path):
+    os.unlink(sock_path)
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+conn, _ = srv.accept()
+conn.sendall(bytes.fromhex("$hexFrame"))
+while True:
+    time.sleep(10)
+''');
+      Process.runSync('chmod', ['+x', script.path]);
+
+      final backend = EngineBackend(
+        executablePath: script.path,
+        audioBackend: 'null',
+        socketPathOverride: sockPath,
+        heartbeatTimeout: const Duration(milliseconds: 120),
+        restartDelay: const Duration(milliseconds: 50),
+        killTermTimeout: const Duration(milliseconds: 100),
+      );
+      addTearDown(backend.dispose);
+
+      await backend.start();
+      expect(backend.status, BackendStatus.running);
+      final firstPid = backend.activeProcessPid;
+      expect(firstPid, isNotNull);
+
+      // Wait for HANG -> SIGTERM -> SIGKILL -> replacement child start.
+      for (var i = 0; i < 40; i++) {
+        if (backend.lastFreeze?.code == 'HANG' &&
+            backend.activeProcessPid != null &&
+            backend.activeProcessPid != firstPid) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+
+      expect(backend.lastFreeze?.code, 'HANG');
+      final secondPid = backend.activeProcessPid;
+      expect(secondPid, isNotNull);
+      expect(secondPid, isNot(firstPid));
+
+      // The first hung process must have been SIGKILLed (no orphan).
+      final firstAlive =
+          Process.runSync('kill', ['-0', '$firstPid']).exitCode == 0;
+      expect(firstAlive, isFalse);
+
+      // Disposing kills the second hung process too.
+      await backend.dispose();
+      final secondAlive =
+          Process.runSync('kill', ['-0', '$secondPid']).exitCode == 0;
+      expect(secondAlive, isFalse);
     });
   });
 
@@ -477,6 +608,71 @@ void main() {
       expect(done.sections, isNotEmpty);
       expect(done.notes, isNotEmpty);
       expect(done.peakVoices, greaterThan(0));
+
+      // Deterministic peaks across renders of the same recipe.
+      await backend.send(
+        pb.ToEngine(
+          renderPiece: pb.RenderPiece(
+            id: 'r2',
+            lengthS: 60.0,
+            wavPath: '/tmp/fake_r2.wav',
+            recipe: pb.Recipe(genre: genresMsg.genres.first.id, seed: 12345),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final done2 = events
+          .lastWhere((e) => e.whichKind() == pb.FromEngine_Kind.renderDone)
+          .renderDone;
+      expect(done2.peaks.first.max, done.peaks.first.max);
+      expect(done2.peaks.last.min, done.peaks.last.min);
+
+      // PlayPiece without play_live capability returns ErrorReply.
+      await backend.playPiece(pb.Recipe(genre: genresMsg.genres.first.id, seed: 1));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(
+        events.any(
+          (e) =>
+              e.whichKind() == pb.FromEngine_Kind.error &&
+              e.error.command == 'play_piece',
+        ),
+        isTrue,
+      );
+
+      // Audition of preset fails when all 16 channels are bound, while .wav succeeds.
+      await backend.setSetup({
+        for (var ch = 1; ch <= 16; ch++) ch: 'SYNTHS/000 Rich Saw Bass.XML',
+      });
+      events.clear();
+      await backend.audition(path: 'SYNTHS/165 Acid Arp.XML');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(
+        events.any(
+          (e) =>
+              e.whichKind() == pb.FromEngine_Kind.error &&
+              e.error.command == 'audition',
+        ),
+        isTrue,
+      );
+
+      events.clear();
+      await backend.audition(path: 'SAMPLES/DRUMS/909 Kick.wav');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(
+        events.any((e) => e.whichKind() == pb.FromEngine_Kind.error),
+        isFalse,
+      );
+
+      // simulateFreeze clears active setup (spec §7.3), so audition works again after restart.
+      await backend.simulateFreeze();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      events.clear();
+      await backend.audition(path: 'SYNTHS/165 Acid Arp.XML');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(
+        events.any((e) => e.whichKind() == pb.FromEngine_Kind.error),
+        isFalse,
+      );
     });
   });
 }

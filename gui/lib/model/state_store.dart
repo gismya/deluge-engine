@@ -236,6 +236,8 @@ class FileStateStore implements StateStore {
   FileStateStore([String? path]) : filePath = path ?? defaultStatePath();
 
   final String filePath;
+  Future<void> _pendingSave = Future<void>.value();
+  int _writeSequence = 0;
 
   static String defaultStatePath() {
     final home = Platform.environment['HOME'] ??
@@ -272,13 +274,30 @@ class FileStateStore implements StateStore {
   }
 
   @override
-  Future<void> save(AppDocumentState state) async {
+  Future<void> save(AppDocumentState state) {
+    final next = _pendingSave.catchError((Object _) {}).then(
+          (_) => _writeAtomically(state),
+        );
+    _pendingSave = next;
+    return next;
+  }
+
+  Future<void> _writeAtomically(AppDocumentState state) async {
     final file = File(filePath);
     await file.parent.create(recursive: true);
-    final tmp = File('$filePath.tmp');
+    final tmp = File('$filePath.$pid.${++_writeSequence}.tmp');
     final encoded = const JsonEncoder.withIndent('  ').convert(state.toJson());
-    await tmp.writeAsString('$encoded\n', flush: true);
-    await tmp.rename(filePath);
+    try {
+      await tmp.writeAsString('$encoded\n', flush: true);
+      await tmp.rename(filePath);
+    } catch (_) {
+      if (tmp.existsSync()) {
+        try {
+          tmp.deleteSync();
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 }
 

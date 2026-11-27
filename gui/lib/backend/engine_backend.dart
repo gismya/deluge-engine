@@ -7,6 +7,7 @@ import 'package:deluge_engine_gui/backend/backend.dart';
 import 'package:deluge_engine_gui/backend/framing.dart';
 import 'package:deluge_engine_gui/backend/restart_policy.dart';
 import 'package:deluge_engine_gui/proto/engine.pb.dart' as pb;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
 /// Maximum UTF-8 byte length for a Unix domain socket path under `$TMPDIR`
@@ -28,6 +29,7 @@ class EngineBackend extends Backend {
     this.heartbeatTimeout = const Duration(seconds: 2),
     this.restartDelay = const Duration(milliseconds: 250),
     this.shutdownTimeout = const Duration(seconds: 3),
+    this.killTermTimeout = const Duration(milliseconds: 500),
     RestartPolicy? restartPolicy,
     DateTime Function()? now,
   })  : _now = now ?? DateTime.now,
@@ -49,6 +51,7 @@ class EngineBackend extends Backend {
   final Duration heartbeatTimeout;
   final Duration restartDelay;
   final Duration shutdownTimeout;
+  final Duration killTermTimeout;
 
   final DateTime Function() _now;
   final RestartPolicy _restartPolicy;
@@ -67,9 +70,13 @@ class EngineBackend extends Backend {
   Process? _process;
   Socket? _socket;
   StreamSubscription<List<int>>? _socketSub;
+  StreamSubscription<List<int>>? _stdoutSub;
+  StreamSubscription<String>? _stderrSub;
   Directory? _ownedSocketDir;
   Timer? _heartbeatTimer;
   Timer? _restartTimer;
+  Future<void>? _activeStart;
+  Future<void>? _pendingCleanup;
   final FrameDecoder _decoder = FrameDecoder();
   final List<String> _stderrTail = <String>[];
 
@@ -100,6 +107,10 @@ class EngineBackend extends Backend {
 
   @override
   String? get errorMessage => _errorMessage;
+
+  /// PID of the active child process, if any (exposed for orphan-cleanup tests).
+  @visibleForTesting
+  int? get activeProcessPid => _process?.pid;
 
   /// Recent stderr lines from the Engine process, for diagnostics.
   List<String> get stderrTail => List.unmodifiable(_stderrTail);
@@ -139,17 +150,29 @@ class EngineBackend extends Backend {
   }
 
   @override
-  Future<void> start() async {
-    if (_disposed) return;
+  Future<void> start() {
+    if (_disposed) return Future<void>.value();
+    if (_activeStart != null) return _activeStart!;
+    if (_status == BackendStatus.running ||
+        _status == BackendStatus.starting ||
+        _status == BackendStatus.restarting) {
+      return Future<void>.value();
+    }
     _intentionalStop = false;
     _versionMismatchMessage = null;
     _errorMessage = null;
-    await _startSession(isRestart: false);
+    final future = _startSession(isRestart: false);
+    _activeStart = future;
+    future.whenComplete(() {
+      if (identical(_activeStart, future)) _activeStart = null;
+    });
+    return future;
   }
 
   @override
   Future<void> restart() async {
     if (_disposed) return;
+    _sessionId++;
     _restartTimer?.cancel();
     _restartTimer = null;
     _restartPolicy.reset();
@@ -157,8 +180,14 @@ class EngineBackend extends Backend {
     _handlingFailure = false;
     _versionMismatchMessage = null;
     _errorMessage = null;
-    await _cleanupConnection(killProcess: true);
-    await _startSession(isRestart: true);
+    await _runCleanup(killProcess: true);
+    if (_disposed || _intentionalStop) return;
+    final future = _startSession(isRestart: true);
+    _activeStart = future;
+    future.whenComplete(() {
+      if (identical(_activeStart, future)) _activeStart = null;
+    });
+    await future;
   }
 
   @override
@@ -174,31 +203,58 @@ class EngineBackend extends Backend {
   @override
   Future<void> shutdown() async {
     _intentionalStop = true;
+    _sessionId++;
     _restartTimer?.cancel();
     _restartTimer = null;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
 
+    // Capture session resources synchronously before any await.
     final sock = _socket;
+    final proc = _process;
+    final sub = _socketSub;
+    final stdoutSub = _stdoutSub;
+    final stderrSub = _stderrSub;
+    final ownedDir = _ownedSocketDir;
+    _socket = null;
+    _process = null;
+    _socketSub = null;
+    _stdoutSub = null;
+    _stderrSub = null;
+    _ownedSocketDir = null;
+
+    var shutdownSent = false;
     if (sock != null) {
       try {
         sock.add(encodeFrame(pb.ToEngine(shutdown: pb.Shutdown())));
         await sock.flush();
+        shutdownSent = true;
       } catch (_) {
-        // Best-effort clean shutdown.
+        shutdownSent = false;
       }
-    }
-
-    final proc = _process;
-    if (proc != null) {
       try {
-        await proc.exitCode.timeout(shutdownTimeout);
-      } catch (_) {
-        proc.kill(ProcessSignal.sigkill);
+        sock.destroy();
+      } catch (_) {}
+    }
+
+    await _cancelSub(sub);
+
+    if (proc != null) {
+      if (shutdownSent) {
+        try {
+          await proc.exitCode.timeout(shutdownTimeout);
+        } on TimeoutException {
+          await _terminateProcess(proc, termTimeout: killTermTimeout);
+        } catch (_) {}
+      } else {
+        await _terminateProcess(proc, termTimeout: killTermTimeout);
       }
     }
 
-    await _cleanupConnection(killProcess: false);
+    await _cancelSub(stdoutSub);
+    await _cancelSub(stderrSub);
+    _deleteDirBestEffort(ownedDir);
+    await _awaitPendingCleanup();
     _setStatus(BackendStatus.stopped);
   }
 
@@ -207,9 +263,13 @@ class EngineBackend extends Backend {
     if (_disposed) return;
     _disposed = true;
     _intentionalStop = true;
+    _sessionId++;
     _restartTimer?.cancel();
+    _restartTimer = null;
     _heartbeatTimer?.cancel();
-    await _cleanupConnection(killProcess: true);
+    _heartbeatTimer = null;
+    await _runCleanup(killProcess: true);
+    await _awaitPendingCleanup();
     await _events.close();
     await _lifecycle.close();
   }
@@ -247,22 +307,27 @@ class EngineBackend extends Backend {
       isRestart: isRestart,
     );
 
-    String sockPath;
-    if (socketPathOverride != null) {
-      sockPath = socketPathOverride!;
-    } else {
-      final (createdPath, dir) = createSocketPath();
-      sockPath = createdPath;
-      _ownedSocketDir = dir;
-    }
-
+    String? exe;
     if (spawnProcess) {
-      final exe = resolveExecutablePath();
+      exe = resolveExecutablePath();
       if (!File(exe).existsSync()) {
         final msg = 'Engine binary not found at $exe';
         _setStatus(BackendStatus.error, errorMessage: msg);
         return;
       }
+    }
+
+    String sockPath;
+    Directory? createdDir;
+    if (socketPathOverride != null) {
+      sockPath = socketPathOverride!;
+    } else {
+      final (createdPath, dir) = createSocketPath();
+      sockPath = createdPath;
+      createdDir = dir;
+    }
+
+    if (spawnProcess) {
       final args = <String>[
         'serve',
         '--socket',
@@ -272,39 +337,66 @@ class EngineBackend extends Backend {
         if (trace) '--trace',
         ...extraArgs,
       ];
+      Process proc;
       try {
-        final proc = await Process.start(exe, args);
-        _process = proc;
-        _stderrTail.clear();
-        proc.stderr
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .listen((line) {
-          _stderrTail.add(line);
-          if (_stderrTail.length > 50) _stderrTail.removeAt(0);
-        });
-        unawaited(proc.exitCode.then((code) {
-          if (session != _sessionId || _intentionalStop || _disposed) return;
-          _processExited = true;
-          _processExitCode = code;
-          if (_status == BackendStatus.running) {
-            _onUnexpectedFailure(
-              FreezeInfo(
-                code: 'EXIT($code)',
-                message: 'Engine exited unexpectedly with status $code',
-                loaded: '',
-                timestamp: _now(),
-              ),
-            );
-          }
-        }));
+        proc = await Process.start(exe!, args);
       } catch (e) {
+        _deleteDirBestEffort(createdDir);
+        if (session != _sessionId || _intentionalStop || _disposed) return;
         _setStatus(
           BackendStatus.error,
           errorMessage: 'Failed to start Engine: $e',
         );
         return;
       }
+
+      // Always drain stdout/stderr so pipes never block the child process.
+      final stdoutSub = proc.stdout.listen((_) {}, onError: (_) {});
+      final stderrSub = proc.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(
+            (line) {
+              if (session != _sessionId || _disposed) return;
+              _stderrTail.add(line);
+              if (_stderrTail.length > 50) _stderrTail.removeAt(0);
+            },
+            onError: (_) {},
+          );
+
+      // If dispose/shutdown/restart ran while Process.start was in flight,
+      // terminate this process immediately without touching current state.
+      if (session != _sessionId || _intentionalStop || _disposed) {
+        await _terminateProcess(proc, termTimeout: killTermTimeout);
+        await _cancelSub(stdoutSub);
+        await _cancelSub(stderrSub);
+        _deleteDirBestEffort(createdDir);
+        return;
+      }
+
+      _ownedSocketDir = createdDir;
+      _process = proc;
+      _stdoutSub = stdoutSub;
+      _stderrSub = stderrSub;
+      _stderrTail.clear();
+
+      unawaited(proc.exitCode.then((code) {
+        if (session != _sessionId || _intentionalStop || _disposed) return;
+        _processExited = true;
+        _processExitCode = code;
+        if (_status == BackendStatus.running) {
+          _onUnexpectedFailure(
+            FreezeInfo(
+              code: 'EXIT($code)',
+              message: 'Engine exited unexpectedly with status $code',
+              loaded: '',
+              timestamp: _now(),
+            ),
+          );
+        }
+      }));
+    } else {
+      _ownedSocketDir = createdDir;
     }
 
     Socket socket;
@@ -312,7 +404,7 @@ class EngineBackend extends Backend {
       socket = await _connectWithRetry(sockPath, session);
     } catch (e) {
       if (session != _sessionId || _intentionalStop || _disposed) return;
-      await _cleanupConnection(killProcess: true);
+      await _runCleanup(killProcess: true);
       if (isRestart) {
         _onUnexpectedFailure(
           FreezeInfo(
@@ -332,12 +424,18 @@ class EngineBackend extends Backend {
     }
 
     if (session != _sessionId || _intentionalStop || _disposed) {
-      socket.destroy();
+      try {
+        socket.destroy();
+      } catch (_) {}
       return;
     }
 
     _socket = socket;
+    final expectedVersion = pb.ProtocolVersion.PROTOCOL_VERSION_CURRENT.value;
     final helloCompleter = Completer<pb.Hello>();
+    var handshakeDone = false;
+    var versionValid = false;
+    final preHandshakeFrames = <pb.FromEngine>[];
 
     _socketSub = socket.listen(
       (chunk) {
@@ -348,6 +446,7 @@ class EngineBackend extends Backend {
         } on FramingException catch (e) {
           if (!helloCompleter.isCompleted) {
             helloCompleter.completeError(e);
+            return;
           }
           _onUnexpectedFailure(
             FreezeInfo(
@@ -367,6 +466,7 @@ class EngineBackend extends Backend {
           } catch (e) {
             if (!helloCompleter.isCompleted) {
               helloCompleter.completeError(e);
+              return;
             }
             _onUnexpectedFailure(
               FreezeInfo(
@@ -388,7 +488,19 @@ class EngineBackend extends Backend {
               );
               return;
             }
+            versionValid = msg.hello.protocolVersion == expectedVersion;
             helloCompleter.complete(msg.hello);
+            if (!versionValid) {
+              // Drop any trailing frames in this chunk on version mismatch.
+              return;
+            }
+            continue;
+          }
+
+          if (!handshakeDone) {
+            if (versionValid) {
+              preHandshakeFrames.add(msg);
+            }
             continue;
           }
 
@@ -398,6 +510,7 @@ class EngineBackend extends Backend {
       onError: (Object error) {
         if (!helloCompleter.isCompleted) {
           helloCompleter.completeError(error);
+          return;
         }
         if (session != _sessionId || _intentionalStop || _disposed) return;
         _onUnexpectedFailure(
@@ -414,6 +527,7 @@ class EngineBackend extends Backend {
           helloCompleter.completeError(
             StateError('Engine closed the socket before sending Hello'),
           );
+          return;
         }
         if (session != _sessionId || _intentionalStop || _disposed) return;
         _onUnexpectedFailure(
@@ -432,7 +546,7 @@ class EngineBackend extends Backend {
       receivedHello = await helloCompleter.future.timeout(connectTimeout);
     } catch (e) {
       if (session != _sessionId || _intentionalStop || _disposed) return;
-      await _cleanupConnection(killProcess: true);
+      await _runCleanup(killProcess: true);
       _setStatus(
         BackendStatus.error,
         errorMessage: 'Engine handshake failed: $e',
@@ -442,12 +556,11 @@ class EngineBackend extends Backend {
 
     if (session != _sessionId || _intentionalStop || _disposed) return;
 
-    final expectedVersion = pb.ProtocolVersion.PROTOCOL_VERSION_CURRENT.value;
-    if (receivedHello.protocolVersion != expectedVersion) {
+    if (!versionValid) {
       _versionMismatchMessage =
           'Protocol version mismatch: Engine reports v${receivedHello.protocolVersion}, '
           'GUI expects v$expectedVersion.';
-      await _cleanupConnection(killProcess: true);
+      await _runCleanup(killProcess: true);
       _setStatus(
         BackendStatus.versionMismatch,
         errorMessage: _versionMismatchMessage,
@@ -461,6 +574,13 @@ class EngineBackend extends Backend {
     if (!_events.isClosed) {
       _events.add(pb.FromEngine(hello: receivedHello));
     }
+    handshakeDone = true;
+
+    for (final buffered in preHandshakeFrames) {
+      if (session != _sessionId || _intentionalStop || _disposed) break;
+      _handleIncomingMessage(buffered, session);
+    }
+    preHandshakeFrames.clear();
     await Future<void>.microtask(() {});
   }
 
@@ -509,12 +629,12 @@ class EngineBackend extends Backend {
   void _onUnexpectedFailure(FreezeInfo freeze) {
     if (_handlingFailure || _intentionalStop || _disposed) return;
     _handlingFailure = true;
-    _sessionId++;
+    final failureSession = ++_sessionId;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
 
     final shouldRestart = _restartPolicy.recordFailureAndShouldRestart();
-    unawaited(_cleanupConnection(killProcess: true));
+    final cleanupFuture = _runCleanup(killProcess: true);
 
     if (!shouldRestart) {
       _setStatus(BackendStatus.crashed, freeze: freeze);
@@ -523,10 +643,19 @@ class EngineBackend extends Backend {
 
     _setStatus(BackendStatus.restarting, freeze: freeze);
     _restartTimer?.cancel();
-    _restartTimer = Timer(restartDelay, () {
-      if (_disposed || _intentionalStop) return;
-      unawaited(_startSession(isRestart: true));
-    });
+    // Wait for both old-process cleanup and restartDelay before spawning the
+    // replacement Engine so a hung child is guaranteed dead first.
+    unawaited(Future.wait<void>([
+      cleanupFuture,
+      Future<void>.delayed(restartDelay),
+    ]).then((_) {
+      if (_disposed || _intentionalStop || _sessionId != failureSession) return;
+      final future = _startSession(isRestart: true);
+      _activeStart = future;
+      future.whenComplete(() {
+        if (identical(_activeStart, future)) _activeStart = null;
+      });
+    }));
   }
 
   Future<Socket> _connectWithRetry(String socketPath, int session) async {
@@ -561,39 +690,96 @@ class EngineBackend extends Backend {
     }
   }
 
+  Future<void> _runCleanup({required bool killProcess}) {
+    final future = _cleanupConnection(killProcess: killProcess);
+    final prev = _pendingCleanup;
+    final combined = prev == null
+        ? future
+        : Future.wait<void>([prev, future]).then((_) {});
+    _pendingCleanup = combined;
+    combined.whenComplete(() {
+      if (identical(_pendingCleanup, combined)) _pendingCleanup = null;
+    });
+    return future;
+  }
+
+  Future<void> _awaitPendingCleanup() async {
+    final pending = _pendingCleanup;
+    if (pending != null) {
+      try {
+        await pending;
+      } catch (_) {}
+    }
+  }
+
+  /// Captures and clears all current-session fields synchronously before any
+  /// await, then terminates any hung process (SIGTERM -> SIGKILL) before
+  /// removing the temporary socket directory.
   Future<void> _cleanupConnection({required bool killProcess}) async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
 
     final sub = _socketSub;
     _socketSub = null;
-    if (sub != null) {
-      try {
-        await sub.cancel();
-      } catch (_) {}
-    }
-
     final sock = _socket;
     _socket = null;
+    final proc = _process;
+    _process = null;
+    final stdoutSub = _stdoutSub;
+    _stdoutSub = null;
+    final stderrSub = _stderrSub;
+    _stderrSub = null;
+    final ownedDir = _ownedSocketDir;
+    _ownedSocketDir = null;
+
     if (sock != null) {
       try {
         sock.destroy();
       } catch (_) {}
     }
 
-    final proc = _process;
-    _process = null;
+    await _cancelSub(sub);
+
     if (proc != null && killProcess) {
-      try {
-        proc.kill(ProcessSignal.sigterm);
-      } catch (_) {}
+      await _terminateProcess(proc, termTimeout: killTermTimeout);
     }
 
-    final ownedDir = _ownedSocketDir;
-    _ownedSocketDir = null;
-    if (ownedDir != null && ownedDir.existsSync()) {
+    await _cancelSub(stdoutSub);
+    await _cancelSub(stderrSub);
+    _deleteDirBestEffort(ownedDir);
+  }
+
+  static Future<void> _terminateProcess(
+    Process proc, {
+    required Duration termTimeout,
+  }) async {
+    try {
+      proc.kill(ProcessSignal.sigterm);
+    } catch (_) {}
+    try {
+      await proc.exitCode.timeout(termTimeout);
+      return;
+    } on TimeoutException {
       try {
-        ownedDir.deleteSync(recursive: true);
+        proc.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+      try {
+        await proc.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  static Future<void> _cancelSub(StreamSubscription<dynamic>? sub) async {
+    if (sub == null) return;
+    try {
+      await sub.cancel();
+    } catch (_) {}
+  }
+
+  static void _deleteDirBestEffort(Directory? dir) {
+    if (dir != null && dir.existsSync()) {
+      try {
+        dir.deleteSync(recursive: true);
       } catch (_) {}
     }
   }

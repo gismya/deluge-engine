@@ -358,7 +358,7 @@ class AppModel extends ChangeNotifier {
           _ab = 'B';
         }
         _statusMessage = 'Render complete (${done.durationS.toStringAsFixed(0)} s)';
-        unawaited(saveDocumentState());
+        _saveDocumentStateInBackground();
       case pb.FromEngine_Kind.renderFailed:
         final rf = msg.renderFailed;
         _activeRenders.remove(rf.id);
@@ -393,7 +393,13 @@ class AppModel extends ChangeNotifier {
 
     await saveDocumentState();
     if (_backendStatus == BackendStatus.running) {
-      await backend.setCard(trimmed);
+      try {
+        await backend.setCard(trimmed);
+      } catch (e) {
+        if (_disposed) return;
+        _lastError = 'Failed to send card folder: $e';
+        notifyListeners();
+      }
     }
   }
 
@@ -445,7 +451,13 @@ class AppModel extends ChangeNotifier {
 
   Future<void> _sendCurrentSetup() async {
     if (_disposed || _backendStatus != BackendStatus.running) return;
-    await backend.setSetup(_setupBindings);
+    try {
+      await backend.setSetup(_setupBindings);
+    } catch (e) {
+      if (_disposed) return;
+      _lastError = 'Failed to send Setup: $e';
+      notifyListeners();
+    }
   }
 
   Future<void> setDevices({
@@ -457,10 +469,16 @@ class AppModel extends ChangeNotifier {
     notifyListeners();
     await saveDocumentState();
     if (_backendStatus == BackendStatus.running) {
-      await backend.setDevices(
-        audioOutput: _selectedAudioOutput,
-        midiInputs: _selectedMidiInputs,
-      );
+      try {
+        await backend.setDevices(
+          audioOutput: _selectedAudioOutput,
+          midiInputs: _selectedMidiInputs,
+        );
+      } catch (e) {
+        if (_disposed) return;
+        _lastError = 'Failed to set devices: $e';
+        notifyListeners();
+      }
     }
   }
 
@@ -485,13 +503,13 @@ class AppModel extends ChangeNotifier {
     if (_autoRender == value) return;
     _autoRender = value;
     notifyListeners();
-    unawaited(saveDocumentState());
+    _saveDocumentStateInBackground();
   }
 
   void setVoiceWarningThreshold(int? threshold) {
     _voiceWarningThreshold = threshold;
     notifyListeners();
-    unawaited(saveDocumentState());
+    _saveDocumentStateInBackground();
   }
 
   void setAuditioningPath(String? path) {
@@ -516,6 +534,16 @@ class AppModel extends ChangeNotifier {
       );
 
   Future<void> saveDocumentState() => store.save(toDocumentState());
+
+  void _saveDocumentStateInBackground() {
+    unawaited(
+      saveDocumentState().catchError((Object e) {
+        if (_disposed) return;
+        _lastError = 'Failed to save state: $e';
+        notifyListeners();
+      }),
+    );
+  }
 
   /// Full state snapshot as pretty-printed JSON for the `{}` debug panel (spec §8).
   String toDebugJson() => const JsonEncoder.withIndent('  ').convert({

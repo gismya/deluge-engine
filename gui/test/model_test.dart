@@ -80,6 +80,33 @@ void main() {
       final store = FileStateStore(path);
       expect(await store.load(), isNull);
     });
+
+    test('serializes concurrent saves without temp-file races or corruption',
+        () async {
+      final path = p.join(tempDir.path, 'state.json');
+      final store = FileStateStore(path);
+
+      await Future.wait([
+        for (var i = 0; i < 20; i++)
+          store.save(
+            AppDocumentState(
+              cardFolder: '/cards/$i',
+              seed: 1000 + i,
+            ),
+          ),
+      ]);
+
+      final loaded = await store.load();
+      expect(loaded, isNotNull);
+      expect(loaded!.cardFolder, '/cards/19');
+      expect(loaded.seed, 1019);
+
+      final leftovers = tempDir
+          .listSync()
+          .where((e) => e.path.endsWith('.tmp'))
+          .toList();
+      expect(leftovers, isEmpty);
+    });
   });
 
   group('AppModel', () {

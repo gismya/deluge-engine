@@ -100,6 +100,11 @@ class FakeBackend extends Backend {
   @override
   Future<void> start() async {
     if (_disposed) return;
+    if (_status == BackendStatus.running ||
+        _status == BackendStatus.starting ||
+        _status == BackendStatus.restarting) {
+      return;
+    }
     await _connect(isRestart: false);
   }
 
@@ -109,6 +114,8 @@ class FakeBackend extends Backend {
     _restartTimer?.cancel();
     _restartTimer = null;
     _restartPolicy.reset();
+    _activeSetup.clear();
+    _cancelledRenders.clear();
     _versionMismatchMessage = null;
     _errorMessage = null;
     await _connect(isRestart: true);
@@ -223,6 +230,8 @@ class FakeBackend extends Backend {
     _heartbeatTimer?.cancel();
     _voices = 0;
     _playingWavPath = null;
+    _activeSetup.clear();
+    _cancelledRenders.clear();
 
     final info = FreezeInfo(
       code: code,
@@ -268,8 +277,21 @@ class FakeBackend extends Backend {
       case pb.ToEngine_Kind.setSetup:
         _handleSetSetup(message.setSetup);
       case pb.ToEngine_Kind.audition:
-        _voices = max(_voices, 2);
-        _emitHeartbeat();
+        final isSample =
+            message.audition.path.toLowerCase().endsWith('.wav');
+        if (!isSample && _activeSetup.length >= 16) {
+          _emit(
+            pb.FromEngine(
+              error: pb.ErrorReply(
+                command: 'audition',
+                message: 'All 16 MIDI channels are bound; no channel free to audition preset',
+              ),
+            ),
+          );
+        } else {
+          _voices = max(_voices, 2);
+          _emitHeartbeat();
+        }
       case pb.ToEngine_Kind.note:
         final n = message.note;
         if (n.on) {
@@ -312,8 +334,19 @@ class FakeBackend extends Backend {
       case pb.ToEngine_Kind.stop:
         _playingWavPath = null;
       case pb.ToEngine_Kind.playPiece:
-        _voices = 9;
-        _emitHeartbeat();
+        if (!hasCapability('play_live')) {
+          _emit(
+            pb.FromEngine(
+              error: pb.ErrorReply(
+                command: 'play_piece',
+                message: "Capability 'play_live' is not supported",
+              ),
+            ),
+          );
+        } else {
+          _voices = 9;
+          _emitHeartbeat();
+        }
       case pb.ToEngine_Kind.stopPiece:
         _voices = 0;
         _emitHeartbeat();
@@ -400,8 +433,7 @@ class FakeBackend extends Backend {
     }
 
     final rolledRecipe = _fillRecipe(genre, req.recipe);
-    final waveSeed = rolledRecipe.seed ^
-        rolledRecipe.picks.fold(0, (a, p) => a ^ p.path.hashCode);
+    final waveSeed = _deterministicWaveSeed(rolledRecipe);
 
     _emit(
       pb.FromEngine(
@@ -470,10 +502,27 @@ class FakeBackend extends Backend {
     );
   }
 
+  /// Deterministic FNV-1a 32-bit hash over recipe seed and picks so fake
+  /// waveforms are identical across Dart VM invocations (spec §8 goldens).
+  static int _deterministicWaveSeed(pb.Recipe recipe) {
+    var hash = 0x811c9dc5 ^ (recipe.seed & 0xFFFFFFFF);
+    for (final pick in recipe.picks) {
+      for (final unit in pick.path.codeUnits) {
+        hash ^= unit & 0xFF;
+        hash = (hash * 0x01000193) & 0xFFFFFFFF;
+      }
+      hash ^= 0xFF;
+      hash = (hash * 0x01000193) & 0xFFFFFFFF;
+    }
+    return hash & 0x7FFFFFFF;
+  }
+
   @override
   Future<void> shutdown() async {
     _heartbeatTimer?.cancel();
     _restartTimer?.cancel();
+    _activeSetup.clear();
+    _cancelledRenders.clear();
     _setStatus(BackendStatus.stopped);
   }
 
