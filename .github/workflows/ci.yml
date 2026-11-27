@@ -30,12 +30,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Dart SDK
+        if: strategy.job-index == 0
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: '3.14.0'
       - name: Tools
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app
           clang --version
-          brew install ninja
+          brew install ninja protobuf
           cmake --version
+          protoc --version
       # The compiler guard in CMakeLists.txt: an Apple clang 17 (Xcode 26.0.1) configure must stop at once with
       # its message. Skipped if the image drops that Xcode.
       - name: Compiler guard
