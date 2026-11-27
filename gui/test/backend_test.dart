@@ -277,7 +277,8 @@ void main() {
         () async {
       final sockPath = p.join(tempDir.path, 'mismatch.sock');
       final server = _FakeUnixEngineServer(sockPath, (client, incoming) async {
-        // Send mismatched Hello + Heartbeat in a single coalesced write.
+        // Send mismatched Hello + Heartbeat in a single coalesced write, then
+        // immediately close the socket to verify onDone doesn't auto-restart.
         final coalesced = Uint8List.fromList([
           ...encodeFrame(
             pb.FromEngine(
@@ -292,6 +293,8 @@ void main() {
           ),
         ]);
         client.add(coalesced);
+        await client.flush();
+        await client.close();
       });
       await server.start();
       addTearDown(server.close);
@@ -446,9 +449,12 @@ void main() {
 
     test('escalates SIGTERM to SIGKILL on HANG/dispose with no orphan child',
         () async {
-      // Executable script that ignores SIGTERM and never binds the socket.
+      // Executable script that installs trap "" TERM, signals readiness on stderr,
+      // and never binds the socket.
       final script = File(p.join(tempDir.path, 'ignore_term.sh'));
-      script.writeAsStringSync('#!/bin/sh\ntrap "" TERM\nexec sleep 60\n');
+      script.writeAsStringSync(
+        '#!/bin/sh\ntrap "" TERM\necho READY >&2\nexec sleep 60\n',
+      );
       Process.runSync('chmod', ['+x', script.path]);
 
       final backend = EngineBackend(
@@ -457,13 +463,17 @@ void main() {
         connectTimeout: const Duration(seconds: 5),
         killTermTimeout: const Duration(milliseconds: 100),
       );
+      addTearDown(backend.dispose);
 
-      // Start connecting in the background; dispose while child is alive.
+      // Start connecting in the background; wait until trap "" TERM is active.
       final startFuture = backend.start();
       int? childPid;
-      for (var i = 0; i < 50; i++) {
-        childPid = backend.activeProcessPid;
-        if (childPid != null) break;
+      for (var i = 0; i < 100; i++) {
+        if (backend.activeProcessPid != null &&
+            backend.stderrTail.contains('READY')) {
+          childPid = backend.activeProcessPid;
+          break;
+        }
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       expect(childPid, isNotNull);
@@ -474,6 +484,132 @@ void main() {
       // Verify child PID no longer exists (`kill -0` returns non-zero).
       final alive = Process.runSync('kill', ['-0', '$childPid']).exitCode == 0;
       expect(alive, isFalse);
+    });
+
+    test('concurrent restart() calls leave no orphan SIGTERM-ignoring child',
+        () async {
+      final pidsLog = File(p.join(tempDir.path, 'restart_pids.log'));
+      final script = File(p.join(tempDir.path, 'ignore_term_restart.sh'));
+      script.writeAsStringSync(
+        '#!/bin/sh\ntrap "" TERM\necho \$\$ >> "${pidsLog.path}"\necho READY >&2\nexec sleep 60\n',
+      );
+      Process.runSync('chmod', ['+x', script.path]);
+
+      final backend = EngineBackend(
+        executablePath: script.path,
+        audioBackend: 'null',
+        connectTimeout: const Duration(milliseconds: 400),
+        killTermTimeout: const Duration(milliseconds: 100),
+      );
+      addTearDown(backend.dispose);
+
+      final initialStart = backend.start();
+      for (var i = 0; i < 100; i++) {
+        if (backend.activeProcessPid != null &&
+            backend.stderrTail.contains('READY')) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      final firstPid = backend.activeProcessPid;
+      expect(firstPid, isNotNull);
+
+      // Issue two restarts back-to-back while the first child ignores SIGTERM.
+      final r1 = backend.restart();
+      final r2 = backend.restart();
+      await Future.wait([initialStart, r1, r2]);
+      await backend.dispose();
+
+      final spawnedPids = pidsLog
+          .readAsLinesSync()
+          .map((l) => int.tryParse(l.trim()))
+          .whereType<int>()
+          .toList();
+      expect(spawnedPids, contains(firstPid));
+      for (final pId in spawnedPids) {
+        final alive = Process.runSync('kill', ['-0', '$pId']).exitCode == 0;
+        expect(alive, isFalse, reason: 'PID $pId survived restart/dispose');
+      }
+    });
+
+    test('restart() during shutdown() waits for teardown and keeps new session running',
+        () async {
+      final sockPath = p.join(tempDir.path, 'restart_during_shutdown.sock');
+      final pidsLog = File(p.join(tempDir.path, 'shutdown_pids.log'));
+      final helloFrame = encodeFrame(
+        pb.FromEngine(
+          hello: pb.Hello(
+            protocolVersion: pb.ProtocolVersion.PROTOCOL_VERSION_CURRENT.value,
+            engineVersion: 'shutdown-race-test',
+          ),
+        ),
+      );
+      final hexFrame = helloFrame
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // Python child that ignores SIGTERM and ignores Shutdown frames so
+      // shutdown() must wait for shutdownTimeout -> SIGTERM -> SIGKILL.
+      final script = File(p.join(tempDir.path, 'slow_shutdown_engine.py'));
+      script.writeAsStringSync('''#!/usr/bin/env python3
+import os, signal, socket, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open("${pidsLog.path}", "a") as f:
+    f.write(f"{os.getpid()}\\n")
+sock_path = sys.argv[sys.argv.index("--socket") + 1]
+if os.path.exists(sock_path):
+    os.unlink(sock_path)
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(1)
+conn, _ = srv.accept()
+conn.sendall(bytes.fromhex("$hexFrame"))
+while True:
+    time.sleep(10)
+''');
+      Process.runSync('chmod', ['+x', script.path]);
+
+      final backend = EngineBackend(
+        executablePath: script.path,
+        audioBackend: 'null',
+        socketPathOverride: sockPath,
+        heartbeatTimeout: const Duration(seconds: 10),
+        shutdownTimeout: const Duration(milliseconds: 120),
+        killTermTimeout: const Duration(milliseconds: 100),
+      );
+      addTearDown(backend.dispose);
+
+      await backend.start();
+      expect(backend.status, BackendStatus.running);
+      final firstPid = backend.activeProcessPid;
+      expect(firstPid, isNotNull);
+
+      // Begin shutdown() (blocked waiting on hung child), then call restart() mid-flight.
+      final shutdownFuture = backend.shutdown();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final restartFuture = backend.restart();
+
+      await Future.wait([shutdownFuture, restartFuture]);
+
+      // shutdown() must not overwrite the restarted session back to stopped.
+      expect(backend.status, BackendStatus.running);
+      final secondPid = backend.activeProcessPid;
+      expect(secondPid, isNotNull);
+      expect(secondPid, isNot(firstPid));
+
+      // First hung process is dead before the replacement was started.
+      final firstAlive =
+          Process.runSync('kill', ['-0', '$firstPid']).exitCode == 0;
+      expect(firstAlive, isFalse);
+
+      await backend.dispose();
+      for (final line in pidsLog.readAsLinesSync()) {
+        final pId = int.tryParse(line.trim());
+        if (pId != null) {
+          final alive = Process.runSync('kill', ['-0', '$pId']).exitCode == 0;
+          expect(alive, isFalse, reason: 'PID $pId survived dispose');
+        }
+      }
     });
 
     test('escalates SIGTERM to SIGKILL on HANG for a connected hung child',

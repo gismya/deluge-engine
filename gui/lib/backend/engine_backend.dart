@@ -158,10 +158,15 @@ class EngineBackend extends Backend {
         _status == BackendStatus.restarting) {
       return Future<void>.value();
     }
+    final s = ++_sessionId;
     _intentionalStop = false;
     _versionMismatchMessage = null;
     _errorMessage = null;
-    final future = _startSession(isRestart: false);
+    final future = () async {
+      await _awaitPendingCleanup();
+      if (_disposed || _intentionalStop || _sessionId != s) return;
+      await _startSession(isRestart: false);
+    }();
     _activeStart = future;
     future.whenComplete(() {
       if (identical(_activeStart, future)) _activeStart = null;
@@ -172,7 +177,7 @@ class EngineBackend extends Backend {
   @override
   Future<void> restart() async {
     if (_disposed) return;
-    _sessionId++;
+    final s = ++_sessionId;
     _restartTimer?.cancel();
     _restartTimer = null;
     _restartPolicy.reset();
@@ -181,7 +186,7 @@ class EngineBackend extends Backend {
     _versionMismatchMessage = null;
     _errorMessage = null;
     await _runCleanup(killProcess: true);
-    if (_disposed || _intentionalStop) return;
+    if (_disposed || _intentionalStop || _sessionId != s) return;
     final future = _startSession(isRestart: true);
     _activeStart = future;
     future.whenComplete(() {
@@ -202,8 +207,8 @@ class EngineBackend extends Backend {
 
   @override
   Future<void> shutdown() async {
+    final s = ++_sessionId;
     _intentionalStop = true;
-    _sessionId++;
     _restartTimer?.cancel();
     _restartTimer = null;
     _heartbeatTimer?.cancel();
@@ -223,39 +228,43 @@ class EngineBackend extends Backend {
     _stderrSub = null;
     _ownedSocketDir = null;
 
-    var shutdownSent = false;
-    if (sock != null) {
-      try {
-        sock.add(encodeFrame(pb.ToEngine(shutdown: pb.Shutdown())));
-        await sock.flush();
-        shutdownSent = true;
-      } catch (_) {
-        shutdownSent = false;
-      }
-      try {
-        sock.destroy();
-      } catch (_) {}
-    }
-
-    await _cancelSub(sub);
-
-    if (proc != null) {
-      if (shutdownSent) {
+    await _trackCleanup(() async {
+      var shutdownSent = false;
+      if (sock != null) {
         try {
-          await proc.exitCode.timeout(shutdownTimeout);
-        } on TimeoutException {
-          await _terminateProcess(proc, termTimeout: killTermTimeout);
+          sock.add(encodeFrame(pb.ToEngine(shutdown: pb.Shutdown())));
+          await sock.flush();
+          shutdownSent = true;
+        } catch (_) {
+          shutdownSent = false;
+        }
+        try {
+          sock.destroy();
         } catch (_) {}
-      } else {
-        await _terminateProcess(proc, termTimeout: killTermTimeout);
       }
-    }
 
-    await _cancelSub(stdoutSub);
-    await _cancelSub(stderrSub);
-    _deleteDirBestEffort(ownedDir);
-    await _awaitPendingCleanup();
-    _setStatus(BackendStatus.stopped);
+      await _cancelSub(sub);
+
+      if (proc != null) {
+        if (shutdownSent) {
+          try {
+            await proc.exitCode.timeout(shutdownTimeout);
+          } on TimeoutException {
+            await _terminateProcess(proc, termTimeout: killTermTimeout);
+          } catch (_) {}
+        } else {
+          await _terminateProcess(proc, termTimeout: killTermTimeout);
+        }
+      }
+
+      await _cancelSub(stdoutSub);
+      await _cancelSub(stderrSub);
+      _deleteDirBestEffort(ownedDir);
+    }());
+
+    if (_sessionId == s && !_disposed) {
+      _setStatus(BackendStatus.stopped);
+    }
   }
 
   @override
@@ -269,7 +278,6 @@ class EngineBackend extends Backend {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     await _runCleanup(killProcess: true);
-    await _awaitPendingCleanup();
     await _events.close();
     await _lifecycle.close();
   }
@@ -365,12 +373,14 @@ class EngineBackend extends Backend {
           );
 
       // If dispose/shutdown/restart ran while Process.start was in flight,
-      // terminate this process immediately without touching current state.
+      // terminate this process under _pendingCleanup without touching state.
       if (session != _sessionId || _intentionalStop || _disposed) {
-        await _terminateProcess(proc, termTimeout: killTermTimeout);
-        await _cancelSub(stdoutSub);
-        await _cancelSub(stderrSub);
-        _deleteDirBestEffort(createdDir);
+        await _trackCleanup(() async {
+          await _terminateProcess(proc, termTimeout: killTermTimeout);
+          await _cancelSub(stdoutSub);
+          await _cancelSub(stderrSub);
+          _deleteDirBestEffort(createdDir);
+        }());
         return;
       }
 
@@ -405,6 +415,7 @@ class EngineBackend extends Backend {
     } catch (e) {
       if (session != _sessionId || _intentionalStop || _disposed) return;
       await _runCleanup(killProcess: true);
+      if (session != _sessionId || _intentionalStop || _disposed) return;
       if (isRestart) {
         _onUnexpectedFailure(
           FreezeInfo(
@@ -435,11 +446,12 @@ class EngineBackend extends Backend {
     final helloCompleter = Completer<pb.Hello>();
     var handshakeDone = false;
     var versionValid = false;
+    var versionInvalid = false;
     final preHandshakeFrames = <pb.FromEngine>[];
 
     _socketSub = socket.listen(
       (chunk) {
-        if (session != _sessionId || _disposed) return;
+        if (session != _sessionId || _disposed || versionInvalid) return;
         List<Uint8List> frames;
         try {
           frames = _decoder.addChunk(chunk);
@@ -489,8 +501,9 @@ class EngineBackend extends Backend {
               return;
             }
             versionValid = msg.hello.protocolVersion == expectedVersion;
+            versionInvalid = !versionValid;
             helloCompleter.complete(msg.hello);
-            if (!versionValid) {
+            if (versionInvalid) {
               // Drop any trailing frames in this chunk on version mismatch.
               return;
             }
@@ -512,7 +525,12 @@ class EngineBackend extends Backend {
           helloCompleter.completeError(error);
           return;
         }
-        if (session != _sessionId || _intentionalStop || _disposed) return;
+        if (session != _sessionId ||
+            _intentionalStop ||
+            _disposed ||
+            versionInvalid) {
+          return;
+        }
         _onUnexpectedFailure(
           FreezeInfo(
             code: 'SOCKET',
@@ -529,7 +547,12 @@ class EngineBackend extends Backend {
           );
           return;
         }
-        if (session != _sessionId || _intentionalStop || _disposed) return;
+        if (session != _sessionId ||
+            _intentionalStop ||
+            _disposed ||
+            versionInvalid) {
+          return;
+        }
         _onUnexpectedFailure(
           FreezeInfo(
             code: 'DISCONNECT',
@@ -547,6 +570,7 @@ class EngineBackend extends Backend {
     } catch (e) {
       if (session != _sessionId || _intentionalStop || _disposed) return;
       await _runCleanup(killProcess: true);
+      if (session != _sessionId || _intentionalStop || _disposed) return;
       _setStatus(
         BackendStatus.error,
         errorMessage: 'Engine handshake failed: $e',
@@ -557,10 +581,12 @@ class EngineBackend extends Backend {
     if (session != _sessionId || _intentionalStop || _disposed) return;
 
     if (!versionValid) {
-      _versionMismatchMessage =
+      final mismatchMsg =
           'Protocol version mismatch: Engine reports v${receivedHello.protocolVersion}, '
           'GUI expects v$expectedVersion.';
       await _runCleanup(killProcess: true);
+      if (session != _sessionId || _intentionalStop || _disposed) return;
+      _versionMismatchMessage = mismatchMsg;
       _setStatus(
         BackendStatus.versionMismatch,
         errorMessage: _versionMismatchMessage,
@@ -643,18 +669,30 @@ class EngineBackend extends Backend {
 
     _setStatus(BackendStatus.restarting, freeze: freeze);
     _restartTimer?.cancel();
-    // Wait for both old-process cleanup and restartDelay before spawning the
-    // replacement Engine so a hung child is guaranteed dead first.
-    unawaited(Future.wait<void>([
-      cleanupFuture,
-      Future<void>.delayed(restartDelay),
-    ]).then((_) {
+    _restartTimer = null;
+
+    // Wait for both old-process cleanup and a cancellable restartDelay Timer
+    // before spawning the replacement Engine.
+    var cleanupDone = false;
+    var delayDone = false;
+    void maybeStartReplacement() {
+      if (!cleanupDone || !delayDone) return;
       if (_disposed || _intentionalStop || _sessionId != failureSession) return;
       final future = _startSession(isRestart: true);
       _activeStart = future;
       future.whenComplete(() {
         if (identical(_activeStart, future)) _activeStart = null;
       });
+    }
+
+    _restartTimer = Timer(restartDelay, () {
+      _restartTimer = null;
+      delayDone = true;
+      maybeStartReplacement();
+    });
+    unawaited(cleanupFuture.whenComplete(() {
+      cleanupDone = true;
+      maybeStartReplacement();
     }));
   }
 
@@ -690,25 +728,29 @@ class EngineBackend extends Backend {
     }
   }
 
-  Future<void> _runCleanup({required bool killProcess}) {
-    final future = _cleanupConnection(killProcess: killProcess);
+  /// Registers [future] into the shared pending-cleanup barrier and returns a
+  /// combined future that completes only once this teardown and all prior
+  /// teardowns have finished.
+  Future<void> _trackCleanup(Future<void> future) {
+    final safe = future.catchError((Object _) {});
     final prev = _pendingCleanup;
     final combined = prev == null
-        ? future
-        : Future.wait<void>([prev, future]).then((_) {});
+        ? safe
+        : Future.wait<void>([prev, safe]).then((_) {});
     _pendingCleanup = combined;
     combined.whenComplete(() {
       if (identical(_pendingCleanup, combined)) _pendingCleanup = null;
     });
-    return future;
+    return combined;
   }
+
+  Future<void> _runCleanup({required bool killProcess}) =>
+      _trackCleanup(_cleanupConnection(killProcess: killProcess));
 
   Future<void> _awaitPendingCleanup() async {
     final pending = _pendingCleanup;
     if (pending != null) {
-      try {
-        await pending;
-      } catch (_) {}
+      await pending;
     }
   }
 

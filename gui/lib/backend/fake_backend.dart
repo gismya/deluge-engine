@@ -114,6 +114,9 @@ class FakeBackend extends Backend {
     _restartTimer?.cancel();
     _restartTimer = null;
     _restartPolicy.reset();
+    _voices = 0;
+    _playingWavPath = null;
+    _playingPositionS = 0.0;
     _activeSetup.clear();
     _cancelledRenders.clear();
     _versionMismatchMessage = null;
@@ -521,6 +524,9 @@ class FakeBackend extends Backend {
   Future<void> shutdown() async {
     _heartbeatTimer?.cancel();
     _restartTimer?.cancel();
+    _voices = 0;
+    _playingWavPath = null;
+    _playingPositionS = 0.0;
     _activeSetup.clear();
     _cancelledRenders.clear();
     _setStatus(BackendStatus.stopped);
