@@ -111,6 +111,8 @@ endforeach()
 set(PLATFORM_SOURCES
   engine/platform/host_memory.c
   engine/platform/host_gma.cpp
+  engine/platform/host_freeze.cpp
+  engine/platform/host_startup.cpp
   engine/platform/hw_stubs.cpp
   engine/platform/usb_stubs.c
   engine/platform/host_diskio.c
@@ -171,6 +173,7 @@ target_link_libraries(firmware PUBLIC argon etl::etl)
 # The hardware stand-ins (spec §3.5).
 add_library(engine_platform OBJECT ${PLATFORM_SOURCES})
 set_target_properties(engine_platform PROPERTIES C_STANDARD 23 C_EXTENSIONS ON CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_include_directories(engine_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/engine")
 target_link_libraries(engine_platform PUBLIC firmware)
 target_compile_options(engine_platform PRIVATE ${ENGINE_WARNINGS})
 
@@ -180,3 +183,10 @@ set_target_properties(render_preset PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON
 target_link_libraries(render_preset PRIVATE engine_platform firmware)
 target_compile_options(render_preset PRIVATE ${ENGINE_WARNINGS})
 target_link_options(render_preset PRIVATE -Wl,-dead_strip ${SAN_FLAGS})
+
+# ---- Platform-layer unit tests (E2, spec §3.4 & §3.5).
+add_executable(test_platform tests/platform/test_platform.cpp)
+set_target_properties(test_platform PROPERTIES CXX_STANDARD 23 CXX_EXTENSIONS ON)
+target_link_libraries(test_platform PRIVATE engine_platform firmware)
+target_compile_options(test_platform PRIVATE ${ENGINE_WARNINGS})
+target_link_options(test_platform PRIVATE -Wl,-dead_strip ${SAN_FLAGS})

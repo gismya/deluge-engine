@@ -78,8 +78,9 @@ def make_card(path, via_device=False):
 
 def render(card, out):
     env = dict(os.environ, DELUGE_SD_IMAGE=str(card))
-    return subprocess.run([str(build_dir() / "render_preset"), PRESET, str(out), str(NOTE), str(HELD_S), str(TOTAL_S)],
-                          env=env, capture_output=True, text=True, timeout=RENDER_TIMEOUT_S)
+    return subprocess.run(
+        [str(build_dir() / "render_preset"), "--audio", "null", PRESET, str(out), str(NOTE), str(HELD_S), str(TOTAL_S)],
+        env=env, capture_output=True, text=True, timeout=RENDER_TIMEOUT_S)
 
 
 def read_wav(path):
@@ -112,9 +113,10 @@ class RenderPackSynth(unittest.TestCase):
         out = self.dir / "sine_sub.wav"
         r = render(self.card, out)
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertIn("overruns 0", r.stderr, r.stderr[-2000:])
         channels, rate, bits, left, right = read_wav(out)
         self.assertEqual((channels, rate, bits), (2, RATE, 32))
-        self.assertEqual(len(left), 110272)  # 2.5 s, rounded up to render_preset's 32-frame steps
+        self.assertEqual(len(left), int(TOTAL_S * RATE))  # exact 2.5 s captured from the scheduler-driven DMA sink
         release = NOTE_ON_FRAME + int(HELD_S * RATE)
         self.assertLess(rms(left[:NOTE_ON_FRAME]), 1e-6, "sound before the note")
         held = left[NOTE_ON_FRAME + RATE // 4:release]  # past the 80 ms attack
